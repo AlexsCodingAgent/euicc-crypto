@@ -82,10 +82,22 @@ impl Certificate {
     /// this certificate, and says nothing about whether the issuer was
     /// permitted to issue it.
     pub fn verify_signed_by(&self, issuer: &Certificate) -> Result<()> {
+        self.verify_signed_by_key(&issuer.public_key)
+    }
+
+    /// Verify that `self` was signed by `key`, over `self`'s TBSCertificate.
+    ///
+    /// This is the form the CI key selection needs, where the trust anchor key
+    /// may not be available as a certificate.
+    ///
+    /// Signature verification only: it confirms the key signed this
+    /// certificate and says nothing about whether that key was permitted to
+    /// issue it.
+    pub fn verify_signed_by_key(&self, key: &PublicKey) -> Result<()> {
         let (tbs, sig) = extract_tbs_and_signature(&self.der)?;
         // A certificate signature is ASN.1 DER (RFC 5280), not the raw r||s
         // form SGP.22 uses on the wire, so verify in DER form.
-        issuer.public_key.verify_der(tbs, sig)
+        key.verify_der(tbs, sig)
     }
 }
 

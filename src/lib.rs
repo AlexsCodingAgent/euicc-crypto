@@ -14,6 +14,7 @@
 //! | [`kdf`] | SHA-256 and HKDF-based key derivation |
 //! | [`aead`] | AES-128-GCM for bound profile packages |
 //! | [`x509`] | Certificate parsing and public-key extraction |
+//! | [`ci`] | CI key set and selection of the key that verifies a certificate |
 //! | [`testpki`] | A self-consistent P-256 test chain for the SGP.33 suites |
 //!
 //! # What is NOT implemented
@@ -38,6 +39,7 @@
 #![warn(missing_docs)]
 
 pub mod aead;
+pub mod ci;
 pub mod ecdh;
 pub mod ecdsa;
 pub mod kdf;
