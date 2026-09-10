@@ -1,0 +1,58 @@
+name: CI
+
+# Runs on every branch push and every pull request, so a feature branch is
+# verified before it is merged.
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: fmt / clippy / build / test / docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pinned so CI behaviour is deterministic and matches the version the
+      # code is developed against. Bump deliberately, not implicitly.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Unlike the sibling crates, this one has dependencies (ring,
+      # rustls-webpki), so Cargo.lock is committed and --locked is used to keep
+      # CI resolving exactly the versions that were tested. The sibling crates
+      # stay dependency-free and therefore have no lockfile to honour.
+      - name: Build (all targets)
+        run: cargo build --all-targets --locked
+
+      - name: Test (unit + integration)
+        run: cargo test --all-targets --locked
+
+      # `--all-targets` skips doctests, so run them explicitly.
+      - name: Test (doctests)
+        run: cargo test --doc --locked
+
+      - name: Docs (broken links are errors)
+        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
