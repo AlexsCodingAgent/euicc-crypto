@@ -1,0 +1,16 @@
+[package]
+name = "euicc-crypto"
+version = "0.1.0"
+edition = "2021"
+description = "Cryptographic primitives for GSMA SGP.22/SGP.32 eSIM RSP: ECDSA P-256, ECDH, SHA-256, HKDF, AES-GCM, X.509"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The ONLY crate in this family that has dependencies, deliberately. The core
+# crates (tuddenham-ipad, euicc-simulator) remain dependency-free so they always
+# build offline; this crate is where the crypto lives, and it is pulled in only
+# where crypto is actually needed (currently the ipad-loopback integration).
+#
+# Both are cached locally and were verified to build and run offline.
+ring = "0.17.14"
+rustls-webpki = { version = "0.101.7", default-features = false, features = ["alloc", "std"] }
