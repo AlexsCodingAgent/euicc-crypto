@@ -2,15 +2,43 @@
 name = "euicc-crypto"
 version = "0.1.0"
 edition = "2021"
-description = "Cryptographic primitives for GSMA SGP.22/SGP.32 eSIM RSP: ECDSA P-256, ECDH, SHA-256, HKDF, AES-GCM, X.509"
+description = "Cryptographic primitives for GSMA SGP.22 / SGP.32 eSIM remote SIM provisioning"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/AlexsCodingAgent/euicc-crypto"
 
 [dependencies]
-# The ONLY crate in this family that has dependencies, deliberately. The core
-# crates (tuddenham-ipad, euicc-simulator) remain dependency-free so they always
-# build offline; this crate is where the crypto lives, and it is pulled in only
-# where crypto is actually needed (currently the ipad-loopback integration).
+# Every third-party dependency in the workspace lives here. The sibling crates
+# `tuddenham-ipad` and `euicc-simulator` stay dependency-free so they always
+# build offline; this crate is where that cost is paid, once.
 #
-# Both are cached locally and were verified to build and run offline.
-ring = "0.17.14"
-rustls-webpki = { version = "0.101.7", default-features = false, features = ["alloc", "std"] }
+# Versions are pinned exactly. `Cargo.lock` is committed and CI builds with
+# `--locked`, so the versions tested are the versions used.
+
+# ECC (ECDSA P-256, ECDH P-256) and AES-128-GCM.
+#
+# `ring` is used because the RustCrypto equivalents (p256, ecdsa,
+# elliptic-curve, aes-gcm) are not obtainable in this environment: crates.io
+# returns 403 and none are in the local registry. This is a constraint, not a
+# preference. `ring` is a sound implementation and is already exercised
+# against NIST test vectors in `src/aead.rs`.
+ring = "=0.17.14"
+
+# HKDF and HMAC.
+#
+# Adopted in place of the hand-rolled versions in `src/kdf.rs`. Key derivation
+# sits on the critical path for every session key and there is no reason for
+# this project to own it; `hmac` additionally provides the constant-time tag
+# comparison. Both were verified to reproduce RFC 5869 test case 1 and RFC 4231
+# test case 1 respectively, and to agree byte-for-byte with `ring`'s
+# equivalents. See docs/dependency-review.md.
+hkdf = "=0.12.4"
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+
+# X.509 parsing. Used as an independent structural check on certificate DER,
+# so a malformed certificate is rejected by a second implementation as well as
+# by the local parser. Chain validation against a trust anchor is NOT performed
+# here; see the note in `src/x509.rs`.
+rustls-webpki = "=0.101.7"
+
+[dev-dependencies]
