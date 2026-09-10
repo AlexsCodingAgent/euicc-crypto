@@ -24,6 +24,7 @@
 use euicc_crypto::ci::{CiKeySet, CiSelection};
 use euicc_crypto::ecdsa::KeyPair;
 use euicc_crypto::testpki::TestPki;
+use euicc_crypto::wire::{encode_signature, parse_signature};
 use euicc_crypto::x509::Certificate;
 
 /// Minimal DER TLV helpers, standing in for the IPAd's own codec. The point is
@@ -95,6 +96,8 @@ fn a_full_authenticate_server_exchange_verifies() {
         &server_challenge,
     );
     let server_signature1 = server.sign(&server_signed1).unwrap();
+    // On the wire this is a 5F37 OCTET STRING, not bare r||s bytes.
+    let server_signature1_field = encode_signature(&server_signature1);
 
     // --- step 2: the eUICC selects the CI key and trusts the server cert --
     let server_cert = Certificate::from_der(&server_cert_der).unwrap();
@@ -103,10 +106,15 @@ fn a_full_authenticate_server_exchange_verifies() {
         .expect("the CI key must accept a certificate it issued");
     assert_eq!(chosen.id, pki.ci_pk_id());
 
-    // --- step 3: the eUICC verifies serverSignature1 ----------------------
+    // --- step 3: the eUICC parses the 5F37 field and verifies it ----------
+    let recovered = parse_signature(&server_signature1_field).expect("the 5F37 field must parse");
+    assert_eq!(
+        recovered, server_signature1,
+        "the round trip must preserve it"
+    );
     server_cert
         .public_key()
-        .verify(&server_signed1, server_signature1.as_ref())
+        .verify(&server_signed1, recovered.as_ref())
         .expect("serverSignature1 must verify under the server certificate key");
 
     // --- step 4: the eUICC signs EuiccSigned1 ----------------------------
@@ -126,18 +134,59 @@ fn a_full_authenticate_server_exchange_verifies() {
         .concat(),
     );
     let euicc_signature1 = pki.euicc.sign(&euicc_signed1).unwrap();
+    let euicc_signature1_field = encode_signature(&euicc_signature1);
 
     // --- step 5: the server verifies euiccSignature1 ---------------------
     let euicc_cert = Certificate::from_der(pki.euicc_cert_der()).unwrap();
+    let recovered_euicc = parse_signature(&euicc_signature1_field)
+        .expect("the euiccSignature1 5F37 field must parse");
     euicc_cert
         .public_key()
-        .verify(&euicc_signed1, euicc_signature1.as_ref())
+        .verify(&euicc_signed1, recovered_euicc.as_ref())
         .expect("euiccSignature1 must verify under the eUICC certificate key");
 
     // The signature is a raw 64-byte r||s value, which is what the 5F37 field
     // carries.
     assert_eq!(euicc_signature1.as_ref().len(), 64);
     assert_eq!(server_signature1.as_ref().len(), 64);
+    // Both fields carry the APPLICATION 55 tag, so they are two bytes longer
+    // than the raw signature plus one length byte.
+    assert_eq!(&euicc_signature1_field[..2], &[0x5f, 0x37]);
+    assert_eq!(&server_signature1_field[..2], &[0x5f, 0x37]);
+    assert_eq!(euicc_signature1_field.len(), 67);
+}
+
+#[test]
+fn a_tampered_5f37_field_is_rejected_after_parsing() {
+    // The wrapper must not provide any protection of its own: flipping a byte
+    // inside the signature still has to fail verification.
+    let pki = TestPki::new();
+    let signed = tlv(0x30, &tlv(0x80, &[0x07; 16]));
+    let sig = pki.euicc.sign(&signed).unwrap();
+    let mut field = encode_signature(&sig);
+    let last = field.len() - 1;
+    field[last] ^= 0x01;
+
+    let recovered = parse_signature(&field).unwrap();
+    assert_ne!(recovered, sig);
+    let cert = Certificate::from_der(pki.euicc_cert_der()).unwrap();
+    assert!(
+        cert.public_key()
+            .verify(&signed, recovered.as_ref())
+            .is_err(),
+        "a tampered signature must not verify merely because it parses"
+    );
+}
+
+#[test]
+fn a_signature_under_the_wrong_tag_does_not_parse_as_a_signature() {
+    // Guards against a call site reading a universal OCTET STRING where the
+    // APPLICATION 55 tag is required.
+    let kp = KeyPair::generate().unwrap();
+    let sig = kp.sign(b"x").unwrap();
+    let mut bare = vec![0x04, 64];
+    bare.extend_from_slice(sig.as_ref());
+    assert!(parse_signature(&bare).is_err());
 }
 
 #[test]

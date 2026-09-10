@@ -15,6 +15,7 @@
 //! | [`aead`] | AES-128-GCM for bound profile packages |
 //! | [`x509`] | Certificate parsing and public-key extraction |
 //! | [`ci`] | CI key set and selection of the key that verifies a certificate |
+//! | [`wire`] | SGP.22 wire encodings: the `5F37` signature field |
 //! | [`testpki`] | A self-consistent P-256 test chain for the SGP.33 suites |
 //!
 //! # What is NOT implemented
@@ -44,6 +45,7 @@ pub mod ecdh;
 pub mod ecdsa;
 pub mod kdf;
 pub mod testpki;
+pub mod wire;
 pub mod x509;
 
 pub use ecdsa::{KeyPair, PublicKey, Signature};
