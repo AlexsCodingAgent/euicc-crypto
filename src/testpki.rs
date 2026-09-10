@@ -131,6 +131,17 @@ impl TestPki {
     pub fn ci_public_key(&self) -> PublicKey {
         self.ci.public_key()
     }
+
+    /// Issue a certificate for an arbitrary subject key, signed by the CI.
+    ///
+    /// This is what the RSP server side needs: `serverCertificate` must be a
+    /// certificate for the SM-DP+'s own key, issued by the CI the eUICC trusts.
+    /// The subject key is supplied rather than generated so the caller keeps
+    /// the private half and can sign with it.
+    pub fn issue_for(&self, subject: &KeyPair, label: &str) -> Vec<u8> {
+        build_certificate(label, &subject.public_key(), &self.ci)
+            .expect("issuing a test certificate must succeed")
+    }
 }
 
 /// Build a minimal self-issued X.509 certificate for `subject_key`, signed by
