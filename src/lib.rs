@@ -31,10 +31,11 @@
 //! # Signature encoding
 //!
 //! SGP.22 carries ECDSA signatures as a raw 64-byte `r‖s` concatenation
-//! (`[APPLICATION 55] OCTET STRING`), while `ring` emits and consumes ASN.1
-//! DER. [`ecdsa::der_to_raw`] and [`ecdsa::raw_to_der`] convert between them,
-//! and both are round-trip tested, because getting this wrong produces
-//! signatures that verify in one direction only.
+//! (`[APPLICATION 55] OCTET STRING`). [`ecdsa`] works in that form throughout:
+//! it is what the wire format wants and what `p256` produces natively, so no
+//! conversion between the wire form and ASN.1 DER is needed on the signing
+//! path. [`ecdsa::PublicKey::verify_der`] exists for the cases that genuinely
+//! carry DER, such as an X.509 certificate signature.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
