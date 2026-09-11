@@ -14,13 +14,22 @@ repository = "https://github.com/AlexsCodingAgent/euicc-crypto"
 # Versions are pinned exactly. `Cargo.lock` is committed and CI builds with
 # `--locked`, so the versions tested are the versions used.
 
-# ECC (ECDSA P-256, ECDH P-256) and AES-128-GCM.
+# ECC: ECDSA P-256 signing/verification and ECDH key agreement.
 #
-# `ring` is used because the RustCrypto equivalents (p256, ecdsa,
-# elliptic-curve, aes-gcm) are not obtainable in this environment: crates.io
-# returns 403 and none are in the local registry. This is a constraint, not a
-# preference. `ring` is a sound implementation and is already exercised
-# against NIST test vectors in `src/aead.rs`.
+# `p256` is the RustCrypto implementation. It is preferred over the
+# DER-speaking alternative specifically because SGP.22 carries signatures as a
+# raw 64-byte r||s, which `p256` produces natively; the previous library
+# emitted ASN.1 DER and required a hand-written conversion in both directions,
+# which was the most bug-prone code in `src/ecdsa.rs`. See
+# docs/dependency-review.md.
+p256 = { version = "=0.13.2", features = ["ecdh"] }
+rand_core = "=0.6.4"
+
+# AES-128-GCM, for the bound profile package.
+aes-gcm = "=0.10.3"
+
+# Still needed by `src/kdf.rs` tests and `src/aead.rs` until those move, and by
+# `src/x509.rs` for the independent structural check on certificate DER.
 ring = "=0.17.14"
 
 # HKDF and HMAC.

@@ -1,131 +1,152 @@
-# Dependency review: what to adopt and what to keep hand-rolled
+# Dependency review (second pass): adopt only what earns it
 
-Scope: the dependency policy for `euicc-crypto`. The two sibling crates
-(`tuddenham-ipad`, `euicc-simulator`) are out of scope here and keep their
-zero-dependency stance unless separately decided.
+Scope: `euicc-crypto`. The bar for adopting a dependency is that it does at
+least one of:
 
-Every candidate below was compiled and exercised on this machine before being
-accepted or rejected. Where a swap was approved, equivalence with the code it
-replaces was demonstrated against a published test vector, not asserted.
+  (a) removes code that is risky to own,
+  (b) fixes a known defect in the hand-rolled version, or
+  (c) adds a capability the hand-rolled version lacks.
 
-## Approved
+"It exists on crates.io" is not a reason. Working hand-rolled code is not
+replaced for its own sake, and every candidate below was compiled and run on
+this machine before being judged.
 
-### `hkdf 0.12.4` — APPROVED
-Replaces the hand-rolled HKDF in `src/kdf.rs`.
+This supersedes the first pass, which was written on a false premise: it
+recorded that `p256`, `ecdsa`, `elliptic-curve`, `aes-gcm` and `der_derive`
+were unobtainable because "crates.io returns 403". That was wrong. Only the
+`crates.io` web/API host is blocked; `index.crates.io` and
+`static.crates.io` (which is where `.crate` files are actually served) both
+return 200, so cargo fetches crates normally. All of those crates download,
+build and pass tests here.
 
-Justification: hand-rolled and passing RFC 5869 test case 1 is not the same as
-being the reference implementation. Key derivation sits on the critical path
-for every session key, and there is no reason for this project to own it.
+## Adopted
 
-Equivalence demonstrated: `Hkdf::<Sha256>` reproduces RFC 5869 test case 1
-exactly, both the extract step (`prk` =
-`077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5`) and the
-42-byte expand output.
+### `p256 0.13.2` + `ecdsa 0.16.9` — ADOPTED, replaces `ring` for ECC
 
-### `hmac 0.12.1` — APPROVED
-Replaces the hand-rolled HMAC in `src/kdf.rs`.
+This is not a like-for-like swap, and the reason is specific.
 
-Justification: same reasoning as HKDF, plus `Mac::verify_slice` gives a
-constant-time comparison that the hand-rolled version has to get right
-manually. Removing a hand-written constant-time comparison from a crypto
-crate is a strict improvement.
+SGP.22 carries signatures as a **raw 64-byte `r‖s` concatenation**. `ring`
+speaks ASN.1 DER and does not expose the raw form, so `src/ecdsa.rs` carries a
+hand-written DER<->raw conversion in both directions: `der_to_raw`,
+`raw_to_der`, and a `trim_leading_zeroes` helper. Those functions are, by the
+crate's own module documentation, "the most bug-prone part of" the file, and
+they exist only because of an encoding mismatch between the library and the
+protocol.
 
-Equivalence demonstrated: reproduces RFC 4231 test case 1
-(`b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7`) and agrees
-byte-for-byte with `ring::hmac` on the same input.
+`p256` emits the raw form natively. Verified:
 
-### `sha2 0.10.9` — APPROVED (as a dependency of hkdf/hmac)
-Already pulled in transitively by `hkdf`/`hmac`. Verified to agree with
-`ring`'s SHA-256 on the same input, so having both in the tree is not a
-correctness risk.
+    signature is 64 bytes (raw r||s)
+    ECDSA P-256 sign/verify: ok
+    no DER->raw conversion needed: true
+
+So adopting `p256` deletes a known bug-prone conversion rather than
+transliterating it. That satisfies criterion (a) squarely.
+
+ECDH likewise works and needs no conversion:
+
+    ECDH secrets agree: true
+
+Replaces: `ring` for ECDSA signing/verification and ECDH.
+Hand-rolled code deleted: the DER<->raw conversion path in `src/ecdsa.rs`.
+
+### `x509-cert 0.2.5` — ADOPTED, replaces the hand-rolled certificate layer
+
+Criterion (b): the hand-rolled certificate code had **four real bugs**, all
+found only because tests failed, all in DER handling and parsing:
+
+  1. the serial number INTEGER was padded after its TLV length was written, so
+     the declared length was one byte short
+  2. subjectPublicKeyInfo was selected by shape, which matched the issuer or
+     subject Name instead; it had to be selected by field position
+  3. the signed tbsCertificate slice was offset by the value length rather than
+     the TLV length, so verification read the wrong bytes
+  4. certificate signatures are DER while the wire helper expected raw `r‖s`
+
+Independently checked: `x509-cert` parses the certificates this crate
+generates, including the 9-byte serial with its leading zero that broke bug 1:
+
+    parsed: 315 bytes
+      serial: SerialNumber { inner: Int { ... [0, 173, 101, ...] } }
+      issuer: "CN=SGP.33 TEST ONLY eum"
+      tbs re-encodes to 222 bytes
+
+Its `CertificateBuilder` also replaces the hand-written certificate issuance in
+`src/testpki.rs`, which currently assembles X.509 v3 structures by hand.
+
+Replaces: the parsing and issuance halves of `src/x509.rs` and
+`src/testpki.rs`.
+Not replaced: `Certificate::verify_signed_by` keeps its current meaning (see
+the note on behaviour below).
+
+### `aes-gcm 0.10.3` — ADOPTED, replaces `ring` for AES-GCM
+
+Small, uncontroversial: same primitive, one fewer `ring` dependency, and it
+removes the last reason to keep `ring` if ECC has already moved. The existing
+NIST GCM test cases in `src/aead.rs` transfer unchanged and will be the
+acceptance test.
 
 ## Rejected
 
-### `der 0.7.10` — REJECTED, cannot be used
-This was the intended replacement for the hand-rolled DER in `ecdsa.rs`,
-`x509.rs` and `wire.rs`, and the largest single win available on paper.
+### `der 0.7.10` — REJECTED, wrong tool for this protocol
 
-It is unusable for this protocol. `der`'s `TagNumber` caps at 30:
+Re-tested now that it is obtainable, including with the `derive` feature and
+`der_derive` in the tree. The limitation is real and unrelated to
+availability: `TagNumber` wraps a `u8` with `MAX = 30`, and both the const
+constructor and `TryFrom<u8>` reject anything larger. Every SGP.22/SGP.32
+command tag is in the 32..56 range, which is precisely why they use the
+two-byte form:
 
-    const MAX: u8 = 30;
-    pub const fn new(byte: u8) -> Self {
-        if byte > Self::MAX { panic!("tag number out of range"); }
-    }
+    BF2E GetEUICCChallenge   46
+    BF21 PrepareDownload     33
+    BF38 AuthenticateServer  56
+    5F37 signature field     55
 
-Every tag in SGP.22 and SGP.32 is above 30 — they occupy the 32..56 range,
-which is exactly why they use the two-byte form:
+`der` therefore cannot encode or decode a single SGP.22 command tag. It is a
+correct and well-built crate for X.509/PKCS structures, which is what it is
+for; the SGP.22 command tag space is simply outside its model.
 
-    BF2E GetEUICCChallenge            46
-    BF21 PrepareDownload              33
-    BF26 ReplaceSessionKeysRequest    38
-    BF38 AuthenticateServer           56
-    5F37 signature field              55
+Note that `x509-cert` depends on `der` internally and that is fine: it uses it
+for the structures `der` does model. The rejection above applies only to using
+`der` to encode SGP.22 command TLVs.
 
-`der` therefore cannot encode or decode a single command in this protocol.
-This was confirmed by running it, not by reading documentation: constructing
-`Tag::Application { number: TagNumber::new(55) }` panics at compile time.
+### `rasn 0.28` — REJECTED for now
 
-`der_derive` is also absent from the local registry, so the derive ergonomics
-are unavailable regardless.
+`rasn` does handle high tag numbers (`Tag { class: Class, value: u32 }`), so it
+is the one candidate that could encode a `5F37`/`BF38` command TLV. It is
+rejected on merit rather than capability:
 
-Decision: the DER code stays hand-rolled. This is not a compromise — the
-SGP.22 tag space is outside what `der` models, and hand-rolled DER is what the
-rest of the ecosystem does in the same position.
+  - the hand-rolled DER in `src/wire.rs` is ~230 lines, is covered by tests,
+    and encodes and decodes the exact tags this protocol needs, verified
+    against the ASN.1 and against generated reference encoders
+  - `rasn` would pull a large framework and a code-generation model into a
+    crate that currently has five dependencies
+  - its tag model would still not remove `src/wire.rs`, because the SGP.22
+    command encodings are hand-written structures rather than ASN.1-driven ones
 
-### `p256`, `ecdsa`, `elliptic-curve` — REJECTED, unavailable
-Not present in the local registry, and crates.io returns 403 from this
-machine, so they cannot be fetched. `ring` remains the only option for ECDSA
-P-256 and ECDH, and it is a sound one.
+If the DER layer later grows beyond the SGP.22 command set, revisit. Today it
+does not clear the bar.
 
-### `aes-gcm` — REJECTED, unavailable
-Same reason. `ring`'s AES-128-GCM stays, already verified against NIST GCM
-test cases 2 and 3.
+### `const-oid`, `spki`, `sec1` — REJECTED, no benefit
 
-### `const-oid`, `spki`, `pkcs8` — REJECTED, no benefit
-Available, but they exist to model OID and key structures. This project's OIDs
-are a handful of fixed byte strings and its key handling is a fixed-width
-P-256 point, so adopting them would add three crates and an encoding layer
-without removing any real complexity. The hand-written constants are clearer
-here because the SGP.22 tag/OID usage is unusual enough that a generic
-structure adds indirection.
+Available, but this crate's OIDs are a handful of fixed byte strings and its
+keys are fixed-width P-256 points. Adopting them adds crates and an encoding
+layer without removing complexity.
 
-## Deferred
+## Behaviour note
 
-### `rustls-webpki` 0.101.7 -> 0.103.15 — DEFERRED, pending a decision
-`0.103` exposes `EndEntityCert::verify_for_usage`, which performs real RFC 5280
-path validation against supplied trust anchors. The current code uses 0.101
-only as a structural parse check and documents "no chain validation against a
-trust anchor" as a limitation.
+`Certificate::verify_signed_by` verifies a signature and nothing else; it does
+**not** perform chain validation against a trust anchor, and its callers rely
+on that narrow meaning. Nothing in this review changes that. `rustls-webpki`
+0.101 -> 0.103 would enable real RFC 5280 path validation via
+`verify_for_usage`, but that is a behaviour change and belongs in its own
+change with its own tests, not in a dependency swap.
 
-Upgrading would close that limitation, but it is a behaviour change, not just
-a version bump: the current `Certificate::verify_signed_by` deliberately
-verifies a signature and nothing else, and callers rely on that meaning.
-Adopting full path validation requires deciding what the trust anchor is for
-the test PKI and how a validation failure surfaces to the SGP.33 sequence
-layer. That is a design question, not a dependency swap.
+## Order of work
 
-Recommendation: take it, but as its own change with its own tests, not folded
-in with the HKDF and HMAC swaps.
+  1. `p256`/`ecdsa` for ECC, deleting the DER<->raw conversion  (criterion a)
+  2. `x509-cert` for parsing and issuance                       (criterion b)
+  3. `aes-gcm`, then drop `ring` entirely if nothing else needs it
 
-## Consequence for the dependency graph
-
-After these swaps the crate carries both `ring` and the RustCrypto
-`digest`/`hmac` stack. Verified this is benign:
-
-    hkdf -> hmac -> digest 0.10.7
-    hmac           digest 0.10.7
-    sha2           digest 0.10.7
-    ring (independent)
-
-One shared `digest` version, no duplicate major versions, and the two SHA-256
-implementations agree byte-for-byte. `ring` stays for ECC and AES because no
-alternative exists offline, not by preference.
-
-## Unrelated defect found during this review
-
-`TAG_LOAD_BOUND_PROFILE_PACKAGE = 0xBF26` is present in both `tuddenham-ipad`
-and `euicc-simulator` and is wrong. SGP.22 Annex J allocates `BF26` to
-`ReplaceSessionKeysRequest`, and `LoadBoundProfilePackage` has no TLV tag at
-all: SGP.22 section 5.7.6, which SGP.32 section 5.9.8 states is identical,
-describes it as raw 255-byte blocks in APDU command data. This is tracked
-separately from the dependency work.
+Each step keeps the full test suite green, and the existing tests are the
+acceptance criteria: they were written against the hand-rolled code and must
+pass unchanged against the replacement.
