@@ -37,19 +37,19 @@ fn generator_and_parser_agree_on_the_signed_bytes() {
     let der = pki.eum_cert_der();
     let (tbs, sig) = tbs_and_sig(der);
 
-    println!("tbs {} bytes, head {:02x?}", tbs.len(), &tbs[..12]);
-    println!("sig {} bytes, head {:02x?}", sig.len(), &sig[..8]);
-
+    // `tbs_and_sig` extracts the TBS and signature by walking the DER by hand;
+    // `Certificate::from_der` is the parser the crate actually uses. Agreeing on
+    // the byte ranges is what this checks -- when they disagreed, the signature
+    // verified against bytes nothing else computed.
     let cert = Certificate::from_der(der).unwrap();
-    println!("cert public key: {:02x?}", &cert.public_key().as_ref()[..8]);
-    println!(
-        "pki  public key: {:02x?}",
-        &pki.eum_public_key().as_ref()[..8]
+    assert_eq!(
+        cert.public_key().as_ref(),
+        pki.eum_public_key().as_ref(),
+        "the hand-walked and parsed views must name the same key"
     );
 
-    // The EUM certificate is issued by the CI, so its signature verifies
-    // under the CI public key, not the EUM's own key.
+    // The EUM certificate is issued by the CI, so its signature verifies under
+    // the CI public key, not the EUM's own key.
     let res = pki.ci_public_key().verify_der(&tbs, &sig);
-    println!("direct verify_der: {res:?}");
     assert!(res.is_ok(), "the signed bytes must verify: {res:?}");
 }
