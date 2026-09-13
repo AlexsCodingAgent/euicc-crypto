@@ -39,6 +39,14 @@ pub struct TestPki {
     pub eum: KeyPair,
     /// The eUICC key pair.
     pub euicc: KeyPair,
+    /// The eIM key pair.
+    ///
+    /// ESep has an eIM sign an eUICC Package which the eUICC then verifies
+    /// against the key in that eIM's configuration data (SGP.32 §3.3.1). The eIM
+    /// is a distinct entity, so it has its own key rather than borrowing the
+    /// EUM's: a test that used the EUM key would still pass if the eUICC
+    /// verified against the wrong party.
+    pub eim: KeyPair,
     eum_cert: Vec<u8>,
     euicc_cert: Vec<u8>,
     ci_cert: Vec<u8>,
@@ -71,6 +79,7 @@ impl TestPki {
         let ci = KeyPair::generate()?;
         let eum = KeyPair::generate()?;
         let euicc = KeyPair::generate()?;
+        let eim = KeyPair::generate()?;
 
         // The CI public key identifier is a truncated SHA-256 of the CI public
         // key in the real scheme (SGP.22 §5.7.5 allows truncation). 20 bytes is
@@ -89,6 +98,7 @@ impl TestPki {
             ci,
             eum,
             euicc,
+            eim,
             eum_cert,
             euicc_cert,
             ci_cert,
