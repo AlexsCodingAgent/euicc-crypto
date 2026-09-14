@@ -85,6 +85,28 @@ removes the last reason to keep `ring` if ECC has already moved. The existing
 NIST GCM test cases in `src/aead.rs` transfer unchanged and will be the
 acceptance test.
 
+### `cbc 0.1.2`, `aes 0.8.4`, `cmac 0.7.2` — ADOPTED, for BSP secure messaging
+
+Criterion (c): BSP uses AES-CBC-128 for encryption and AES-CMAC-128 for its
+C-MAC (SGP.22 Table 4c), and neither mode was available. GCM cannot stand in
+for CBC, and HMAC is not a cipher-based MAC, so these are missing capabilities
+rather than alternatives to working code.
+
+The cost is smaller than it looks: `aes` and `cipher` were **already in the
+tree** as `aes-gcm`'s own dependencies, at exactly the versions adopted here.
+Only `cbc` and `cmac` are new, both from the same RustCrypto family and built
+against the already-present `aes` and `cipher`. Verified before adoption:
+
+    NIST SP 800-38A F.2.1 (CBC-AES128): reproduced
+    FIPS-197 AES-128 single block:      reproduced
+    NIST SP 800-38B D.1 (AES-128 CMAC): all three examples, incl. empty message
+
+The single-block AES-128 vector is not incidental: BSP's ICV rule is
+`AES-S-ENC(block number)`, so the raw block cipher is used directly and not only
+through the CBC wrapper.
+
+`ring` still has no CBC module in 0.17, so it could not have served here.
+
 ## Rejected
 
 ### `der 0.7.10` — REJECTED, wrong tool for this protocol
