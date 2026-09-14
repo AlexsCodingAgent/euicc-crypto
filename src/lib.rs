@@ -48,6 +48,7 @@ pub mod ci;
 pub mod ecdh;
 pub mod ecdsa;
 pub mod kdf;
+pub mod sgp26;
 pub mod testpki;
 pub mod wire;
 pub mod x509;

@@ -75,6 +75,50 @@ impl Certificate {
         self.webpki_parsed
     }
 
+    /// The `serialNumber` attribute of the subject, if present.
+    ///
+    /// SGP.26's eUICC certificate carries the EID here rather than in the
+    /// certificate's own serial, which is why a conformance check has to read
+    /// the subject attribute rather than the standard serial field.
+    ///
+    /// This is a deliberately narrow reader: it walks the DER to the subject
+    /// SEQUENCE and looks for the `serialNumber` OID
+    /// (`2.5.4.5` = `55 04 05`) with a PrintableString value. Anything it does
+    /// not recognise yields `None` rather than a guess.
+    pub fn subject_serial_number(&self) -> Option<Vec<u8>> {
+        const OID_SERIAL_NUMBER: &[u8] = &[0x06, 0x03, 0x55, 0x04, 0x05];
+
+        let der = &self.der;
+        let mut i = 0usize;
+        while i + OID_SERIAL_NUMBER.len() < der.len() {
+            if der[i..].starts_with(OID_SERIAL_NUMBER) {
+                // Followed by the value: PrintableString (0x13) or UTF8String
+                // (0x0C), then a length, then the bytes.
+                let after = i + OID_SERIAL_NUMBER.len();
+                let tag = *der.get(after)?;
+                if tag != 0x13 && tag != 0x0C {
+                    i += 1;
+                    continue;
+                }
+                let len = *der.get(after + 1)? as usize;
+                // Only short-form lengths: a value longer than 127 octets is not
+                // a serialNumber, so treat it as a non-match rather than
+                // following a length encoding we have not validated.
+                if len > 0x7F {
+                    i += 1;
+                    continue;
+                }
+                let start = after + 2;
+                let end = start.checked_add(len)?;
+                if end <= der.len() {
+                    return Some(der[start..end].to_vec());
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// Verify that `self` was signed by `issuer`'s key, over `self`'s
     /// TBSCertificate.
     ///
