@@ -70,6 +70,13 @@ pub struct Sgp26VariantO {
     /// §3.3.1). SGP.33-1 Annex A defines `EIM_PUBLIC_KEY_DATA_PK` as
     /// `eimPublicKey #PK_S_EIMsign_ECDSA`.
     pub eim_public: PublicKey,
+    /// `SK_S_EIMsign_ECDSA_NIST.pem` — the counterpart private key.
+    ///
+    /// SGP.26 publishes the eIM signing key pair, not just the public half, so
+    /// the harness can produce a signature the eUICC verifies under the
+    /// published key. Signing with a locally generated key while advertising
+    /// this one would be a mismatch that looks like a verification failure.
+    pub eim_private: KeyPair,
 }
 
 impl Sgp26VariantO {
@@ -105,6 +112,7 @@ impl Sgp26VariantO {
             euicc_public,
             euicc_private: private_key_from_pem(&read("SK_EUICC_ECDSA_NIST.pem")?)?,
             eim_public: public_key_from_pem(&read("PK_S_EIMsign_ECDSA_NIST.pem")?)?,
+            eim_private: private_key_from_pem(&read("SK_S_EIMsign_ECDSA_NIST.pem")?)?,
         })
     }
 
@@ -128,6 +136,15 @@ impl Sgp26VariantO {
         self.euicc.verify_signed_by(&self.eum)?;
         // And the EUM certificate by the CI.
         self.eum.verify_signed_by(&self.ci)?;
+        // The eIM key pair must correspond, because the harness signs with the
+        // private half while the eUICC advertises the public half in its eIM
+        // configuration data. A mismatch surfaces as a signature that will not
+        // verify, which reads as a protocol failure rather than a bad fixture.
+        if self.eim_private.public_key().as_ref() != self.eim_public.as_ref() {
+            return Err(crate::Error::Certificate(
+                "SK_S_EIMsign_ECDSA_NIST.pem does not match PK_S_EIMsign_ECDSA_NIST.pem".into(),
+            ));
+        }
         Ok(())
     }
 
