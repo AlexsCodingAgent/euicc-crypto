@@ -188,6 +188,41 @@ fn compute_cmac(
 }
 
 /// The full CMAC output, which is what the MAC chain advances to.
+///
+/// Public so a provider wired to a dependency-free simulator can expose exactly
+/// this operation: the C-MAC input layout *is* the protocol, and a caller that
+/// built it themselves would be free to get the field order wrong. See
+/// [`cmac_over_chaining`].
+pub fn cmac_over_chaining(
+    s_cmac: &[u8],
+    chaining: &[u8],
+    tag: u32,
+    final_length: usize,
+    data: &[u8],
+) -> Result<Vec<u8>> {
+    full_cmac(s_cmac, chaining, tag, final_length, data)
+}
+
+/// A raw AES-CMAC-128 over `data` under `key`, with no chaining or framing.
+///
+/// This is the cryptogram operation, not the C-MAC one: a cryptogram is a bare
+/// CMAC of a single preimage, and reusing the C-MAC helper for it would prepend
+/// a chaining value and a tag the peer does not include.
+pub fn cmac_raw(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    let mut mac = <Cmac<Aes128> as Mac>::new_from_slice(key).map_err(|_| {
+        Error::Malformed(format!(
+            "CMAC key is {} bytes; AES-128 needs {KEY_LEN}",
+            key.len()
+        ))
+    })?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+/// The full CMAC output, which is what the MAC chain advances to.
+///
+/// Private: [`cmac_over_chaining`] is the public face of this, so the truncation
+/// and the chaining rule stay in one file.
 fn full_cmac(
     s_cmac: &[u8],
     chaining: &[u8],
@@ -429,5 +464,40 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("15"), "{err}");
+    }
+
+    #[test]
+    fn the_public_cmac_helpers_agree_with_the_wrapping_they_expose() {
+        // `cmac_over_chaining` must be exactly what `wrap_*` computes, or a
+        // provider wired through it would produce MACs the card rejects.
+        let k = keys();
+        let mut chain = k.mac_chaining.clone();
+        let wrapped = wrap_encrypt(&k, TAG_MAC_AND_ENCRYPT, b"payload", 1, &mut chain).unwrap();
+        let final_length = wrapped.data.len() + CMAC_LEN;
+        let direct = cmac_over_chaining(
+            &k.s_mac,
+            &k.mac_chaining,
+            TAG_MAC_AND_ENCRYPT,
+            final_length,
+            &wrapped.data,
+        )
+        .unwrap();
+        assert_eq!(&direct[..CMAC_LEN], &wrapped.cmac[..]);
+    }
+
+    #[test]
+    fn cmac_raw_does_not_add_framing() {
+        // A raw CMAC of one preimage must differ from the C-MAC of the same
+        // bytes, since the C-MAC prefixes chaining, tag and length.
+        let k = keys();
+        let raw = cmac_raw(&k.s_mac, b"preimage").unwrap();
+        let framed = cmac_over_chaining(&k.s_mac, &k.mac_chaining, 0x86, 8, b"preimage").unwrap();
+        assert_eq!(raw.len(), 16);
+        assert_ne!(raw, framed, "framing must change the output");
+    }
+
+    #[test]
+    fn a_wrong_cmac_key_length_is_reported() {
+        assert!(cmac_raw(&[0u8; 15], b"x").is_err());
     }
 }
