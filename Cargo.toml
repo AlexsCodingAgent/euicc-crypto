@@ -28,6 +28,19 @@ rand_core = "=0.6.4"
 # AES-128-GCM, for the bound profile package.
 aes-gcm = "=0.10.3"
 
+# AES-128-CBC, for BSP secure messaging (SGP.22 2.6.4.4).
+#
+# BSP does not use GCM: it encrypts with AES-CBC-128 and derives its ICV by
+# encrypting a block counter with S-ENC, so GCM cannot stand in. `aes` and
+# `cipher` are already in the tree as `aes-gcm`'s own dependencies, at exactly
+# these versions; only the CBC mode wrapper is new. Verified against NIST
+# SP 800-38A F.2.1 (CBC-AES128) and FIPS-197 (single-block AES-128, which the
+# ICV rule needs). See docs/dependency-review.md.
+cbc = "=0.1.2"
+# The raw AES block cipher, used directly for the BSP ICV rule (encrypt the
+# block number with S-ENC). Same version `aes-gcm` already pulls in.
+aes = "=0.8.4"
+
 # Still needed by `src/kdf.rs` tests and `src/aead.rs` until those move, and by
 # `src/x509.rs` for the independent structural check on certificate DER.
 ring = "=0.17.14"

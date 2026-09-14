@@ -1,10 +1,17 @@
-//! Key derivation: SHA-256 digests, HMAC, and the HKDF that turns an ECDH
-//! shared secret into RSP session keys.
+//! Key derivation: SHA-256 digests, HMAC, and HKDF.
 //!
-//! SGP.22 §5.7.5 specifies the session keys as an HKDF-SHA-256 expansion of the
-//! ECDH shared secret, with the session's own context as the info parameter.
-//! The exact `info` strings differ between the consumer and IoT profiles, so
-//! the caller supplies them; this module does not guess.
+//! # HKDF is not the RSP session-key KDF
+//!
+//! The functions here are general-purpose. SGP.22's session keys and initial MAC
+//! chaining value are **not** derived with HKDF: §2.6.4.2 specifies the **X9.63**
+//! KDF, which is [`crate::x963`]. The string `HKDF` does not occur anywhere in
+//! SGP.22 v3.1 or SGP.32 v1.3.
+//!
+//! An earlier version of this comment claimed "SGP.22 §5.7.5 specifies the
+//! session keys as an HKDF-SHA-256 expansion of the ECDH shared secret". That
+//! was wrong twice over: §5.7.5 is the `InitialiseSecureChannel` function
+//! definition rather than a KDF specification, and the only KDF in the document
+//! is X9.63. Use [`crate::x963::x963_kdf`] for BSP.
 //!
 //! # Why these are not implemented here
 //!

@@ -41,6 +41,8 @@
 #![warn(missing_docs)]
 
 pub mod aead;
+pub mod bsp_keys;
+pub mod cbc128;
 pub mod ci;
 pub mod ecdh;
 pub mod ecdsa;
@@ -48,6 +50,7 @@ pub mod kdf;
 pub mod testpki;
 pub mod wire;
 pub mod x509;
+pub mod x963;
 
 pub use ecdsa::{KeyPair, PublicKey, Signature};
 pub use x509::Certificate;
