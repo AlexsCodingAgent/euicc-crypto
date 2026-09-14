@@ -62,7 +62,10 @@ pub fn parse_signature_bytes(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Read a TLV, returning `(tag, value, total_bytes)`. Handles both one- and
 /// two-byte tags.
-fn read_tlv(input: &[u8]) -> Result<(u16, &[u8], usize)> {
+///
+/// Public because BSP framing also needs to read and write TLVs; it shares this
+/// implementation rather than carrying a second one that could disagree.
+pub fn read_tlv(input: &[u8]) -> Result<(u16, &[u8], usize)> {
     let (tag, tag_bytes) = if input.first().is_some_and(|b| b & 0x1f == 0x1f) {
         if input.len() < 2 {
             return Err(Error::Malformed("truncated multi-byte tag".into()));
@@ -117,7 +120,9 @@ fn read_length(input: &[u8]) -> Result<(usize, usize)> {
 }
 
 /// Encode a DER length.
-fn der_length(len: usize) -> Vec<u8> {
+///
+/// Public for the same reason as [`read_tlv`].
+pub fn der_length(len: usize) -> Vec<u8> {
     if len < 0x80 {
         vec![len as u8]
     } else if len <= 0xff {

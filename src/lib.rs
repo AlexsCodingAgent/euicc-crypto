@@ -41,6 +41,7 @@
 #![warn(missing_docs)]
 
 pub mod aead;
+pub mod bsp;
 pub mod bsp_keys;
 pub mod cbc128;
 pub mod ci;

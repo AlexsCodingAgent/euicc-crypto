@@ -40,6 +40,12 @@ cbc = "=0.1.2"
 # The raw AES block cipher, used directly for the BSP ICV rule (encrypt the
 # block number with S-ENC). Same version `aes-gcm` already pulls in.
 aes = "=0.8.4"
+# AES-CMAC-128, the BSP C-MAC algorithm (SGP.22 Table 4c; NIST SP 800-38B).
+#
+# Not interchangeable with HMAC: BSP's C-MAC is a cipher-based MAC, and the
+# value is the 8 most significant bytes of the CMAC output. Verified against
+# NIST SP 800-38B D.1, all three AES-128 examples including the empty message.
+cmac = "=0.7.2"
 
 # Still needed by `src/kdf.rs` tests and `src/aead.rs` until those move, and by
 # `src/x509.rs` for the independent structural check on certificate DER.
