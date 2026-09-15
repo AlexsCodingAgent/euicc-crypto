@@ -23,7 +23,7 @@
 //! in [`crate::x509`] and for `rustls-webpki`'s DER reader to walk, without
 //! claiming to be fully conformant CA-issued certificates.
 
-use crate::ecdsa::{KeyPair, PublicKey};
+use crate::ecdsa::{CurveKind, KeyPair, PublicKey};
 use crate::kdf::sha256;
 use crate::Result;
 
@@ -76,10 +76,30 @@ impl TestPki {
 
     /// Generate a fresh chain, returning errors rather than panicking.
     pub fn try_new() -> Result<Self> {
-        let ci = KeyPair::generate()?;
-        let eum = KeyPair::generate()?;
-        let euicc = KeyPair::generate()?;
-        let eim = KeyPair::generate()?;
+        Self::try_new_on(CurveKind::P256)
+    }
+
+    /// Generate a fresh chain on a chosen curve.
+    ///
+    /// SGP.26 Variant O publishes a brainpoolP256r1 PKI alongside the NIST one,
+    /// and SGP.33-1's BRP test sequences run the same cases against it. The
+    /// published set has `CERT_EUM_ECDSA_BRP.der` but **no**
+    /// `SK_EUM_ECDSA_BRP.pem` — there is no private key for the EUM in the
+    /// fixture, so a BRP case cannot sign a request the published certificate
+    /// would authenticate. Generating the chain here is what makes those cases
+    /// runnable; the certificate the eUICC is handed is then ours rather than
+    /// SGP.26's, which is a real difference and is why §4.2.18's BRP cases stay
+    /// scaffolds until this material is threaded through the fixture set.
+    ///
+    /// The chain is internally consistent — every key is on `curve`, and each
+    /// certificate's SPKI OID is taken from its own subject key — so a verifier
+    /// reading the curve from the certificate, as SGP.22 requires, sees a
+    /// coherent brainpool chain.
+    pub fn try_new_on(curve: CurveKind) -> Result<Self> {
+        let ci = KeyPair::generate_on(curve)?;
+        let eum = KeyPair::generate_on(curve)?;
+        let euicc = KeyPair::generate_on(curve)?;
+        let eim = KeyPair::generate_on(curve)?;
 
         // The CI public key identifier is a truncated SHA-256 of the CI public
         // key in the real scheme (SGP.22 §5.7.5 allows truncation). 20 bytes is
@@ -177,7 +197,6 @@ impl TestPki {
 fn build_certificate(label: &str, subject_key: &PublicKey, issuer: &KeyPair) -> Result<Vec<u8>> {
     const OID_ECDSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
     const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
-    const OID_PRIME256V1: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
     // A fixed UTC time so certificate generation is reproducible in structure.
     const UTC_TIME: &[u8] = b"250101000000Z";
 
@@ -211,9 +230,22 @@ fn build_certificate(label: &str, subject_key: &PublicKey, issuer: &KeyPair) -> 
         ),
     );
     let validity = tlv(0x30, &[tlv(0x17, UTC_TIME), tlv(0x17, UTC_TIME)].concat());
+    // The curve OID in the SPKI must name the curve the key is actually on.
+    //
+    // This used to be the `prime256v1` OID unconditionally, which meant a
+    // brainpool subject key was published under a certificate claiming to hold a
+    // P-256 key. A verifier that reads the OID — which is what SGP.22 requires,
+    // since the curve is identified by the certificate and not by anything else
+    // in the protocol — would then parse 64 brainpool bytes as a P-256 point and
+    // reject it, correctly, for a reason that looks like key corruption rather
+    // than a mislabelled certificate.
+    //
+    // Taking the OID from the key removes the possibility of the two disagreeing:
+    // there is no argument to pass and nothing to keep in step.
+    let curve_oid = subject_key.curve().oid();
     let spki_alg = tlv(
         0x30,
-        &[tlv(0x06, OID_EC_PUBLIC_KEY), tlv(0x06, OID_PRIME256V1)].concat(),
+        &[tlv(0x06, OID_EC_PUBLIC_KEY), tlv(0x06, curve_oid)].concat(),
     );
     let spki = tlv(
         0x30,
@@ -282,6 +314,72 @@ mod tests {
         assert_ne!(pki.eum_public_key(), pki.euicc_public_key());
         assert_ne!(pki.eum_public_key(), pki.ci_public_key());
         assert_ne!(pki.euicc_public_key(), pki.ci_public_key());
+    }
+
+    /// A brainpool chain is generated, and every key in it is on brainpool.
+    ///
+    /// This is the material SGP.33-1's BRP cases need and which SGP.26 Variant O
+    /// does not publish — it ships `CERT_EUM_ECDSA_BRP.der` with no matching
+    /// private key.
+    #[test]
+    fn a_brainpool_chain_puts_every_key_on_brainpool() {
+        let pki = TestPki::try_new_on(CurveKind::BrainpoolP256r1)
+            .expect("brainpool key generation must succeed");
+        for (label, key) in [
+            ("eum", pki.eum_public_key()),
+            ("euicc", pki.euicc_public_key()),
+            ("ci", pki.ci_public_key()),
+        ] {
+            assert_eq!(
+                key.curve(),
+                CurveKind::BrainpoolP256r1,
+                "the {label} key must be on brainpoolP256r1"
+            );
+        }
+    }
+
+    /// The SPKI's curve OID must name the curve the key is actually on.
+    ///
+    /// **The test the previous hardcoding would have failed.** `build_certificate`
+    /// wrote the `prime256v1` OID unconditionally, so a brainpool subject key
+    /// produced a certificate claiming to hold a P-256 key — and a verifier that
+    /// reads the curve from the certificate, as SGP.22 requires, would parse 64
+    /// brainpool bytes as a P-256 point and reject them. The failure reads as key
+    /// corruption rather than a mislabelled certificate, which is what made it
+    /// worth pinning here.
+    #[test]
+    fn the_spki_curve_oid_names_the_subject_key_curve() {
+        let brainpool = TestPki::try_new_on(CurveKind::BrainpoolP256r1).expect("brainpool chain");
+        let cert = Certificate::from_der(brainpool.eum_cert_der()).expect("parseable certificate");
+
+        assert_eq!(
+            cert.curve(),
+            CurveKind::BrainpoolP256r1,
+            "a brainpool certificate must parse as brainpool, not as prime256v1"
+        );
+
+        // And the NIST chain is unaffected: the same code path must still emit
+        // the P-256 OID, so a fix that simply swapped one constant for the other
+        // would fail here.
+        let nist = TestPki::try_new_on(CurveKind::P256).expect("nist chain");
+        let cert = Certificate::from_der(nist.eum_cert_der()).expect("parseable certificate");
+        assert_eq!(
+            cert.curve(),
+            CurveKind::P256,
+            "a P-256 certificate must still parse as prime256v1"
+        );
+    }
+
+    /// A brainpool certificate's signature verifies, so the chain is not merely
+    /// well-shaped but cryptographically sound.
+    #[test]
+    fn a_brainpool_certificate_signature_verifies() {
+        let pki = TestPki::try_new_on(CurveKind::BrainpoolP256r1).expect("brainpool chain");
+        let cert = Certificate::from_der(pki.eum_cert_der()).expect("parseable certificate");
+
+        // Signed by the CI, so the CI's public key verifies it.
+        cert.verify_signed_by_key(&pki.ci_public_key())
+            .expect("a brainpool certificate's signature must verify under its issuer");
     }
 
     #[test]
