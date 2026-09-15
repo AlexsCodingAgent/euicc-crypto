@@ -54,7 +54,7 @@ pub mod wire;
 pub mod x509;
 pub mod x963;
 
-pub use ecdsa::{KeyPair, PublicKey, Signature};
+pub use ecdsa::{CurveKind, KeyPair, PublicKey, Signature};
 pub use x509::Certificate;
 
 /// Errors returned by this crate.
