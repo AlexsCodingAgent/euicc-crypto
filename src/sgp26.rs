@@ -39,62 +39,98 @@
 //!
 //! # Curve
 //!
-//! Variant O is published for NIST P-256 and brainpoolP256r1. Only the NIST set
-//! is loaded here, because `p256` is the only curve implementation in the
-//! workspace. The brainpool files are in the same GSMA package if that changes.
+//! Variant O is published for both NIST P-256 and brainpoolP256r1. The file
+//! names differ only in the `_NIST` / `_BRP` suffix, so the loader is
+//! parameterised by [`CurveKind`] rather than duplicated. The SGP.33-1 "BRP"
+//! test sequences need the brainpool set, and SGP.26 populates both in the
+//! same package.
+//!
+//! The `_NIST` set is what [`Sgp26VariantO::load`] reads; use
+//! [`Sgp26VariantO::load_curve`] for brainpool.
 
-use crate::ecdsa::{KeyPair, PublicKey};
+use crate::ecdsa::{CurveKind, KeyPair, PublicKey};
 use crate::x509::Certificate;
 use crate::Result;
 
-/// The published SGP.26 Variant O material, NIST P-256 members.
+/// The published SGP.26 Variant O material for one curve.
 pub struct Sgp26VariantO {
-    /// `CERT_CI_ECDSA_NIST.der` — the Test CI certificate, self-signed.
+    /// Which curve this material is on.
+    pub curve: CurveKind,
+    /// `CERT_CI_ECDSA_<curve>.der` — the Test CI certificate, self-signed.
     pub ci: Certificate,
-    /// `CERT_EUM_ECDSA_NIST.der` — issued by the Test CI.
+    /// `CERT_EUM_ECDSA_<curve>.der` — issued by the Test CI.
     pub eum: Certificate,
-    /// `CERT_EUICC_ECDSA_NIST.der` — issued by the EUM.
+    /// `CERT_EUICC_ECDSA_<curve>.der` — issued by the EUM.
     ///
     /// Its subject serialNumber is the ASCII EID.
     pub euicc: Certificate,
-    /// `PK_EUICC_ECDSA_NIST.pem` — the eUICC's public key.
+    /// `PK_EUICC_ECDSA_<curve>.pem` — the eUICC's public key.
     pub euicc_public: PublicKey,
-    /// `SK_EUICC_ECDSA_NIST.pem` — the eUICC's private key.
+    /// `SK_EUICC_ECDSA_<curve>.pem` — the eUICC's private key.
     ///
     /// Present because the harness plays the eUICC's role in `AuthenticateServer`
     /// and has to sign the authentication response.
     pub euicc_private: KeyPair,
-    /// `PK_S_EIMsign_ECDSA_NIST.pem` — `EIM_PUBLIC_KEY_DATA_PK`.
+    /// `PK_S_EIMsign_ECDSA_<curve>.pem` — `EIM_PUBLIC_KEY_DATA_PK`.
     ///
     /// The key an eUICC verifies eUICC Package signatures against (SGP.32
     /// §3.3.1). SGP.33-1 Annex A defines `EIM_PUBLIC_KEY_DATA_PK` as
     /// `eimPublicKey #PK_S_EIMsign_ECDSA`.
     pub eim_public: PublicKey,
-    /// `SK_S_EIMsign_ECDSA_NIST.pem` — the counterpart private key.
+    /// `SK_S_EIMsign_ECDSA_<curve>.pem` — the counterpart private key.
     ///
     /// SGP.26 publishes the eIM signing key pair, not just the public half, so
     /// the harness can produce a signature the eUICC verifies under the
     /// published key. Signing with a locally generated key while advertising
     /// this one would be a mismatch that looks like a verification failure.
     pub eim_private: KeyPair,
+
+    /// `PK_S_SM_DPauth_ECDSA_<curve>.pem` — `CERT_S_SM_DPauth`'s public key.
+    pub dp_auth_public: Option<PublicKey>,
+    /// `SK_S_SM_DPauth_ECDSA_<curve>.pem` — the SM-DP+ authentication key.
+    pub dp_auth_private: Option<KeyPair>,
+}
+
+impl CurveKind {
+    /// The SGP.26 Variant O file-name suffix for this curve.
+    ///
+    /// SGP.26 names the brainpool material `_BRP` and the NIST material
+    /// `_NIST`; everything else about the file names is identical.
+    pub const fn sgp26_suffix(&self) -> &'static str {
+        match self {
+            CurveKind::P256 => "NIST",
+            CurveKind::BrainpoolP256r1 => "BRP",
+        }
+    }
 }
 
 impl Sgp26VariantO {
     /// The fixture directory, relative to this crate's manifest.
     pub const DIR: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/sgp26/variant-o");
 
-    /// Load the Variant O material from [`Self::DIR`].
+    /// Load the NIST P-256 Variant O material from [`Self::DIR`].
     ///
     /// Returns `Err` rather than panicking if a file is missing or malformed, so
     /// a caller can fall back to [`crate::testpki::TestPki`] deliberately instead
     /// of the suite dying at startup.
     pub fn load() -> Result<Self> {
-        Self::load_from(Self::DIR)
+        Self::load_curve(CurveKind::P256)
     }
 
-    /// Load from an explicit directory.
+    /// Load the Variant O material for `curve` from [`Self::DIR`].
+    pub fn load_curve(curve: CurveKind) -> Result<Self> {
+        Self::load_curve_from(curve, Self::DIR)
+    }
+
+    /// Load from an explicit directory, for `curve`.
     pub fn load_from(dir: impl AsRef<std::path::Path>) -> Result<Self> {
+        Self::load_curve_from(CurveKind::P256, dir)
+    }
+
+    /// Load one curve's material from an explicit directory.
+    pub fn load_curve_from(curve: CurveKind, dir: impl AsRef<std::path::Path>) -> Result<Self> {
         let dir = dir.as_ref();
+        let sfx = curve.sgp26_suffix();
         let read = |name: &str| -> Result<Vec<u8>> {
             let path = dir.join(name);
             std::fs::read(&path).map_err(|e| {
@@ -102,17 +138,39 @@ impl Sgp26VariantO {
             })
         };
 
-        let euicc = Certificate::from_der(&read("CERT_EUICC_ECDSA_NIST.der")?)?;
-        let euicc_public = public_key_from_pem(&read("PK_EUICC_ECDSA_NIST.pem")?)?;
+        let euicc = Certificate::from_der(&read(&format!("CERT_EUICC_ECDSA_{sfx}.der"))?)?;
+        let euicc_public =
+            public_key_from_pem(curve, &read(&format!("PK_EUICC_ECDSA_{sfx}.pem"))?)?;
+
+        // The SM-DP+ authentication pair is optional: some Variant O subsets
+        // publish it and some do not, and a missing pair is not an error.
+        let dp_auth_public = read(&format!("PK_S_SM_DPauth_ECDSA_{sfx}.pem"))
+            .ok()
+            .and_then(|pem| public_key_from_pem(curve, &pem).ok());
+        let dp_auth_private = read(&format!("SK_S_SM_DPauth_ECDSA_{sfx}.pem"))
+            .ok()
+            .and_then(|pem| private_key_from_pem(curve, &pem).ok());
 
         Ok(Sgp26VariantO {
-            ci: Certificate::from_der(&read("CERT_CI_ECDSA_NIST.der")?)?,
-            eum: Certificate::from_der(&read("CERT_EUM_ECDSA_NIST.der")?)?,
+            curve,
+            ci: Certificate::from_der(&read(&format!("CERT_CI_ECDSA_{sfx}.der"))?)?,
+            eum: Certificate::from_der(&read(&format!("CERT_EUM_ECDSA_{sfx}.der"))?)?,
             euicc,
             euicc_public,
-            euicc_private: private_key_from_pem(&read("SK_EUICC_ECDSA_NIST.pem")?)?,
-            eim_public: public_key_from_pem(&read("PK_S_EIMsign_ECDSA_NIST.pem")?)?,
-            eim_private: private_key_from_pem(&read("SK_S_EIMsign_ECDSA_NIST.pem")?)?,
+            euicc_private: private_key_from_pem(
+                curve,
+                &read(&format!("SK_EUICC_ECDSA_{sfx}.pem"))?,
+            )?,
+            eim_public: public_key_from_pem(
+                curve,
+                &read(&format!("PK_S_EIMsign_ECDSA_{sfx}.pem"))?,
+            )?,
+            eim_private: private_key_from_pem(
+                curve,
+                &read(&format!("SK_S_EIMsign_ECDSA_{sfx}.pem"))?,
+            )?,
+            dp_auth_public,
+            dp_auth_private,
         })
     }
 
@@ -207,33 +265,36 @@ fn hex_nibble(c: u8) -> Result<u8> {
     }
 }
 
-/// Decode a SEC1 or PKCS#8 PEM public key.
-fn public_key_from_pem(pem: &[u8]) -> Result<PublicKey> {
+/// Decode a SEC1 or PKCS#8 PEM public key on `curve`.
+fn public_key_from_pem(curve: CurveKind, pem: &[u8]) -> Result<PublicKey> {
     let der = pem_to_der(pem)?;
     // The SGP.26 `PK_*.pem` files are SubjectPublicKeyInfo (X.509), whose payload
     // is the SEC1 point. `Certificate::from_der` is not applicable, so the SPKI
     // wrapper is skipped by scanning for the uncompressed point.
-    let point = extract_sec1_point(&der)?;
-    PublicKey::from_bytes(point)
+    let point = extract_sec1_point(curve, &der)?;
+    PublicKey::from_bytes(curve, point)
 }
 
-/// Decode a SEC1 or PKCS#8 PEM private key.
-fn private_key_from_pem(pem: &[u8]) -> Result<KeyPair> {
+/// Decode a SEC1 or PKCS#8 PEM private key on `curve`.
+fn private_key_from_pem(curve: CurveKind, pem: &[u8]) -> Result<KeyPair> {
     let der = pem_to_der(pem)?;
-    // The SGP.26 `SK_*.pem` files are SEC1 ECPrivateKey, which `p256` reads via
-    // its PKCS#8 path only after conversion; try both.
-    if let Ok(k) = KeyPair::from_pkcs8(&der) {
+    // The SGP.26 `SK_*.pem` files are SEC1 ECPrivateKey. The RustCrypto key
+    // types read PKCS#8 directly, or SEC1 through their own `from_sec1_der`
+    // where the curve is unambiguous; try the direct read first and fall back
+    // to wrapping the SEC1 body in a PKCS#8 PrivateKeyInfo carrying this
+    // curve's OID.
+    if let Ok(k) = KeyPair::from_pkcs8(curve, &der) {
         return Ok(k);
     }
-    let pkcs8 = sec1_private_to_pkcs8(&der)?;
-    KeyPair::from_pkcs8(&pkcs8)
+    let pkcs8 = sec1_private_to_pkcs8(curve, &der)?;
+    KeyPair::from_pkcs8(curve, &pkcs8)
 }
 
-/// Find the uncompressed P-256 point inside a SubjectPublicKeyInfo.
+/// Find the uncompressed point inside a SubjectPublicKeyInfo for `curve`.
 ///
 /// The point is `0x04` followed by 64 bytes. Validated by `PublicKey::from_bytes`
 /// afterwards, so a false positive here fails loudly rather than silently.
-fn extract_sec1_point(spki: &[u8]) -> Result<&[u8]> {
+fn extract_sec1_point(curve: CurveKind, spki: &[u8]) -> Result<&[u8]> {
     const NEEDLE: usize = 65;
     // Inclusive of the last possible start: a point beginning at exactly
     // `len - NEEDLE` is the final valid position, and excluding it silently
@@ -242,34 +303,41 @@ fn extract_sec1_point(spki: &[u8]) -> Result<&[u8]> {
     for start in 0..=spki.len().saturating_sub(NEEDLE) {
         if spki[start] == 0x04 {
             let candidate = &spki[start..start + NEEDLE];
-            if PublicKey::from_bytes(candidate).is_ok() {
+            if PublicKey::from_bytes(curve, candidate).is_ok() {
                 return Ok(candidate);
             }
         }
     }
     Err(crate::Error::Certificate(
-        "no uncompressed P-256 point found in the public key".into(),
+        "no uncompressed point found in the public key".into(),
     ))
 }
 
-/// Wrap a SEC1 `ECPrivateKey` in a PKCS#8 `PrivateKeyInfo`.
+/// Wrap a SEC1 `ECPrivateKey` in a PKCS#8 `PrivateKeyInfo` on `curve`.
 ///
 /// The SEC1 body is carried verbatim as the inner OCTET STRING; only the outer
-/// algorithm identifier is added.
-fn sec1_private_to_pkcs8(sec1: &[u8]) -> Result<Vec<u8>> {
+/// algorithm identifier is added. The curve OID is not optional: the RustCrypto
+/// key types check it against the curve they were asked for, so emitting
+/// prime256v1 here would make a brainpool key fail to load with a confusing
+/// "invalid PKCS#8" message.
+fn sec1_private_to_pkcs8(curve: CurveKind, sec1: &[u8]) -> Result<Vec<u8>> {
     // PrivateKeyInfo ::= SEQUENCE { version INTEGER (0),
     //   privateKeyAlgorithm AlgorithmIdentifier, privateKey OCTET STRING }
-    // AlgorithmIdentifier for id-ecPublicKey with prime256v1:
-    const ALG_ID: &[u8] = &[
-        0x30, 0x13, // SEQUENCE
-        0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, // id-ecPublicKey
-        0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, // prime256v1
+    // AlgorithmIdentifier ::= SEQUENCE { id-ecPublicKey, <namedCurve OID> }
+    let mut alg_id = Vec::new();
+    alg_id.push(0x06);
+    alg_id.push(0x07);
+    alg_id.extend_from_slice(&[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01]); // id-ecPublicKey
+    alg_id.push(0x06);
+    alg_id.push(curve.oid().len() as u8);
+    alg_id.extend_from_slice(curve.oid());
+
+    let mut inner = vec![
+        0x02, 0x01, 0x00, // version 0
+        0x30, // AlgorithmIdentifier SEQUENCE
     ];
-    let mut inner = Vec::new();
-    inner.push(0x02);
-    inner.push(0x01);
-    inner.push(0x00); // version 0
-    inner.extend_from_slice(ALG_ID);
+    inner.extend_from_slice(&der_length(alg_id.len())?);
+    inner.extend_from_slice(&alg_id);
     inner.push(0x04); // OCTET STRING
     inner.extend_from_slice(&der_length(sec1.len())?);
     inner.extend_from_slice(sec1);

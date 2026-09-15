@@ -14,16 +14,50 @@ repository = "https://github.com/AlexsCodingAgent/euicc-crypto"
 # Versions are pinned exactly. `Cargo.lock` is committed and CI builds with
 # `--locked`, so the versions tested are the versions used.
 
-# ECC: ECDSA P-256 signing/verification and ECDH key agreement.
+# ECC: ECDSA P-256 and brainpoolP256r1 signing/verification, plus ECDH key
+# agreement.
 #
-# `p256` is the RustCrypto implementation. It is preferred over the
-# DER-speaking alternative specifically because SGP.22 carries signatures as a
-# raw 64-byte r||s, which `p256` produces natively; the previous library
-# emitted ASN.1 DER and required a hand-written conversion in both directions,
-# which was the most bug-prone code in `src/ecdsa.rs`. See
-# docs/dependency-review.md.
-p256 = { version = "=0.13.2", features = ["ecdh"] }
-rand_core = "=0.6.4"
+# Both curves are RustCrypto implementations and both are now on the same
+# `elliptic-curve` 0.14 / `ecdsa` 0.17 generation, so the workspace carries a
+# single copy of each:
+#
+#   p256    0.14.0  -> elliptic-curve 0.14.1, ecdsa 0.17
+#   bp256   0.14.0  -> elliptic-curve 0.14.1, ecdsa 0.17
+#
+# That version alignment is the reason this is a bump rather than an addition.
+# `bp256` earlier releases (0.6.x) do match the old `ecdsa` 0.16 generation,
+# but their curve arithmetic is gated behind a feature named
+# `wip-arithmetic-do-not-use`: without it `BrainpoolP256r1` is only a curve
+# *identity* (`Curve` / `PrimeCurve` / `PointCompression`) with no
+# `AffinePoint`, no `ProjectivePoint` and no `Scalar`, so it cannot sign or
+# verify anything. 0.14.0 graduates that to a stable `arithmetic` feature.
+# Taking the 0.6.x shortcut would have meant shipping a brainpool curve that
+# cannot do brainpool, behind a feature no reviewer could sign off on.
+#
+# `p256` is preferred over a DER-speaking library specifically because SGP.22
+# carries signatures as a raw 64-byte r||s, which it produces natively; the
+# previous library emitted ASN.1 DER and required a hand-written conversion in
+# both directions, which was the most bug-prone code in `src/ecdsa.rs`.
+# `bp256` behaves identically here. See docs/dependency-review.md.
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "ecdh", "pem", "std"] }
+# brainpoolP256r1, required by the SGP.26 Variant O brainpool test PKI and by
+# the SGP.33-1 "BRP" test sequences.
+#
+# `arithmetic` is not optional: it is what provides the point and scalar types
+# ECDSA needs. `sha256` wires up `DigestAlgorithm` for the curve, which is what
+# makes the generic `Signer` / `Verifier` impls apply; without it the key types
+# exist but expose no signing or verification method.
+bp256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "sha256", "pem", "std"] }
+# Referenced directly for the curve-generic `SigningKey` / `VerifyingKey`
+# types, the `Signer` / `Verifier` traits, `pkcs8`, and the SEC1 point
+# encoding. Pulled in at the same version `p256` and `bp256` use, so there is
+# exactly one `ecdsa` and one `elliptic-curve` in the tree.
+#
+# `algorithm` is what brings `SigningKey` / `VerifyingKey` into scope; without
+# it `ecdsa` exposes only the `Signature` type.
+ecdsa = { version = "=0.17.0", default-features = false, features = ["der", "pem", "pkcs8", "std", "algorithm", "sha2"] }
+elliptic-curve = { version = "=0.14.1", default-features = false, features = ["sec1", "pkcs8", "std"] }
+rand_core = { version = "=0.9.5", features = ["os_rng"] }
 
 # AES-128-GCM, for the bound profile package.
 aes-gcm = "=0.10.3"

@@ -25,7 +25,7 @@
 //! `0x37` continues the tag number to 55. It is therefore read and written as a
 //! multi-byte tag, not as a single byte with a length following it.
 
-use crate::ecdsa::Signature;
+use crate::ecdsa::{CurveKind, Signature};
 use crate::{Error, Result};
 
 /// The `[APPLICATION 55]` tag used for every SGP.22 signature field.
@@ -44,9 +44,19 @@ pub fn encode_signature_bytes(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Parse a `5F37` OCTET STRING back to a [`Signature`].
+/// Parse a `5F37` OCTET STRING back to a P-256 [`Signature`].
+///
+/// SGP.22's wire format carries no algorithm identifier alongside the
+/// signature: the curve is implied by the certificate that will verify it. This
+/// convenience wrapper assumes P-256, which is the mandatory curve for RSP. Use
+/// [`parse_signature_on`] when the signing entity is on brainpoolP256r1.
 pub fn parse_signature(data: &[u8]) -> Result<Signature> {
-    Signature::from_raw(&parse_signature_bytes(data)?)
+    parse_signature_on(CurveKind::P256, data)
+}
+
+/// Parse a `5F37` OCTET STRING back to a [`Signature`] on `curve`.
+pub fn parse_signature_on(curve: CurveKind, data: &[u8]) -> Result<Signature> {
+    Signature::from_raw(curve, &parse_signature_bytes(data)?)
 }
 
 /// Parse a `5F37` OCTET STRING and return the raw bytes.

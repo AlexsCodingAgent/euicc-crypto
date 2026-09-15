@@ -17,7 +17,7 @@
 //!   what §4.2.26 step 2 verifies by extraction and comparison rather than by
 //!   inspecting the algorithm identifier.
 
-use crate::ecdsa::{PublicKey, PUBLIC_KEY_LEN};
+use crate::ecdsa::{CurveKind, PublicKey, PUBLIC_KEY_LEN};
 use crate::{Error, Result};
 
 /// A parsed X.509 certificate.
@@ -62,8 +62,18 @@ impl Certificate {
     }
 
     /// The subject public key.
+    /// The certificate's public key.
+    ///
+    /// Carries the curve the certificate declares in its `namedCurve` OID,
+    /// which is how a caller tells a P-256 certificate from a brainpool one
+    /// without re-parsing the DER.
     pub fn public_key(&self) -> &PublicKey {
         &self.public_key
+    }
+
+    /// The curve this certificate's public key is on.
+    pub fn curve(&self) -> crate::ecdsa::CurveKind {
+        self.public_key.curve()
     }
 
     /// Whether the DER also parsed under webpki's end-entity profile.
@@ -205,7 +215,11 @@ fn extract_spki_public_key(der: &[u8]) -> Result<PublicKey> {
     let spki = fields[spki_index];
     let (alg, alg_used) = read_tlv(spki, 0x30)
         .map_err(|e| Error::Certificate(format!("SPKI has no algorithm SEQUENCE: {e}")))?;
-    let _ = alg;
+    // The AlgorithmIdentifier's second element is the namedCurve OID. SGP.26
+    // publishes Variant O for P-256 and brainpoolP256r1, and a certificate
+    // signed on one curve cannot be verified on the other, so the curve has to
+    // come from the certificate rather than from the caller's assumption.
+    let curve = curve_from_algorithm_identifier(alg)?;
     let bitstring_input = &spki[alg_used..];
     let (bits, _) = read_tlv(bitstring_input, 0x03)
         .map_err(|e| Error::Certificate(format!("SPKI has no BIT STRING: {e}")))?;
@@ -222,7 +236,44 @@ fn extract_spki_public_key(der: &[u8]) -> Result<PublicKey> {
             "subjectPublicKey BIT STRING declares unused bits".into(),
         ));
     }
-    PublicKey::from_bytes(&bits[1..])
+    PublicKey::from_bytes(curve, &bits[1..])
+}
+
+/// Read the namedCurve OID out of an `AlgorithmIdentifier`.
+///
+/// `AlgorithmIdentifier ::= SEQUENCE { algorithm OID, parameters ANY OPTIONAL }`.
+/// For an EC key the parameters hold the namedCurve OID; the `algorithm` OID is
+/// `id-ecPublicKey`. The OID bytes are compared directly rather than decoded
+/// into an arc list, because only a fixed, known set is of interest and the
+/// comparison stays readable.
+fn curve_from_algorithm_identifier(alg: &[u8]) -> Result<CurveKind> {
+    // First element: id-ecPublicKey, 1.2.840.10045.2.1.
+    let (id_ec_public_key, used) = read_tlv(alg, 0x06)
+        .map_err(|e| Error::Certificate(format!("AlgorithmIdentifier has no OID: {e}")))?;
+    const ID_EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+    if id_ec_public_key != ID_EC_PUBLIC_KEY {
+        return Err(Error::Certificate(
+            "certificate public key is not an EC key".into(),
+        ));
+    }
+    // Second element: the namedCurve OID.
+    let (named_curve, _) = read_tlv(&alg[used..], 0x06).map_err(|e| {
+        Error::Certificate(format!("EC AlgorithmIdentifier has no namedCurve: {e}"))
+    })?;
+    if named_curve == CurveKind::P256.oid() {
+        Ok(CurveKind::P256)
+    } else if named_curve == CurveKind::BrainpoolP256r1.oid() {
+        Ok(CurveKind::BrainpoolP256r1)
+    } else {
+        Err(Error::Certificate(format!(
+            "unsupported namedCurve OID {}",
+            named_curve
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )))
+    }
 }
 
 /// Extract `(tbsCertificate DER as signed, signature BIT STRING payload)`.

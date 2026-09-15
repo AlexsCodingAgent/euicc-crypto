@@ -23,26 +23,185 @@
 //! `p256` is the RustCrypto implementation of NIST P-256, used across the
 //! Rust ecosystem. It replaces `ring` for ECC. See
 //! `docs/dependency-review.md` for the reasoning and the verification.
+//!
+//! # Curves
+//!
+//! NIST P-256 and brainpoolP256r1 are both supported, behind [`CurveKind`].
+//! SGP.26 Variant O carries test PKI for each, and the SGP.33-1 "BRP" test
+//! sequences exercise the brainpool material, so the algorithm has to be
+//! selectable rather than fixed. Both RustCrypto crates are on the same
+//! `elliptic-curve` 0.14 / `ecdsa` 0.17 generation, so the curve-generic
+//! `ecdsa::{SigningKey, VerifyingKey}` types are shared between them.
 
 use crate::{Error, Result};
-use p256::ecdsa::{
-    signature::{Signer as _, Verifier as _},
-    Signature as P256Signature, SigningKey, VerifyingKey,
-};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use ecdsa::signature::{Signer as _, Verifier as _};
+use ecdsa::{SigningKey as GenericSigningKey, VerifyingKey as GenericVerifyingKey};
+use elliptic_curve::sec1::ToSec1Point;
+use elliptic_curve::{pkcs8::DecodePrivateKey as _, pkcs8::EncodePrivateKey as _, Generate as _};
 
-/// Length of a raw `r‖s` signature: two 32-byte scalars.
+/// Which curve a key or signature is defined over.
+///
+/// SGP.22 does not negotiate a curve: it is fixed per certificate, and the
+/// algorithm is identified by the OID in that certificate
+/// (`prime256v1` = 1.2.840.10045.3.1.7, `brainpoolP256r1` =
+/// 1.3.36.3.3.2.8.1.1.7). This enum is how the caller carries that finding
+/// through the signing and verification paths.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CurveKind {
+    /// NIST P-256, the mandatory curve for SGP.22 RSP.
+    P256,
+    /// brainpoolP256r1, RFC 5639. Used by the SGP.26 Variant O brainpool
+    /// test PKI and the SGP.33-1 BRP test sequences.
+    BrainpoolP256r1,
+}
+
+impl CurveKind {
+    /// The SEC1 uncompressed point encoding for this curve.
+    ///
+    /// The `U256` field width is 32 bytes on both curves, so an uncompressed
+    /// point is `0x04` plus two 32-byte coordinates on either.
+    pub const fn public_key_len(&self) -> usize {
+        PUBLIC_KEY_LEN
+    }
+
+    /// Parse an SEC1 uncompressed point on this curve, rejecting anything not
+    /// on it. The `ecdsa` key types are generic over the curve, so each arm
+    /// only differs in which curve type it names.
+    fn verifying_key(&self, point: &[u8]) -> Result<VerifyingKey> {
+        match self {
+            CurveKind::P256 => GenericVerifyingKey::<p256::NistP256>::from_sec1_bytes(point)
+                .map(VerifyingKey::P256)
+                .map_err(|_| Error::Malformed("public key is not a valid point on P-256".into())),
+            CurveKind::BrainpoolP256r1 => {
+                GenericVerifyingKey::<bp256::r1::BrainpoolP256r1>::from_sec1_bytes(point)
+                    .map(VerifyingKey::BrainpoolP256r1)
+                    .map_err(|_| {
+                        Error::Malformed(
+                            "public key is not a valid point on brainpoolP256r1".into(),
+                        )
+                    })
+            }
+        }
+    }
+
+    /// The OID of this curve as it appears in an X.509 `AlgorithmIdentifier`.
+    pub const fn oid(&self) -> &'static [u8] {
+        match self {
+            // 1.2.840.10045.3.1.7
+            CurveKind::P256 => &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07],
+            // 1.3.36.3.3.2.8.1.1.7
+            // (shaped to keep rustfmt from reflowing the match arm)
+            CurveKind::BrainpoolP256r1 => &[0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07],
+        }
+    }
+}
+
+/// A verifying key on either supported curve.
+///
+/// The inner types come from two different crates with no common trait that
+/// exposes `verify` generically over the signature type, so the dispatch is
+/// explicit. Keeping it in one enum means the rest of the module (and every
+/// caller) never has to know which curve is in play.
+enum VerifyingKey {
+    P256(GenericVerifyingKey<p256::NistP256>),
+    BrainpoolP256r1(GenericVerifyingKey<bp256::r1::BrainpoolP256r1>),
+}
+
+impl VerifyingKey {
+    fn verify(&self, message: &[u8], sig: &CurveSignature) -> Result<()> {
+        match (self, sig) {
+            (VerifyingKey::P256(k), CurveSignature::P256(s)) => {
+                k.verify(message, s).map_err(|_| Error::VerificationFailed)
+            }
+            (VerifyingKey::BrainpoolP256r1(k), CurveSignature::BrainpoolP256r1(s)) => {
+                k.verify(message, s).map_err(|_| Error::VerificationFailed)
+            }
+            // A curve mismatch is a caller error, not a bad signature: say so
+            // rather than reporting a verification failure that would send
+            // someone hunting for a key problem that does not exist.
+            _ => Err(Error::Malformed(
+                "signature curve does not match the public key curve".into(),
+            )),
+        }
+    }
+
+    fn to_sec1(&self) -> Vec<u8> {
+        match self {
+            VerifyingKey::P256(k) => k.as_affine().to_sec1_point(false).as_bytes().to_vec(),
+            VerifyingKey::BrainpoolP256r1(k) => {
+                k.as_affine().to_sec1_point(false).as_bytes().to_vec()
+            }
+        }
+    }
+}
+
+/// A fixed-size ECDSA signature on either supported curve.
+enum CurveSignature {
+    P256(p256::ecdsa::Signature),
+    BrainpoolP256r1(bp256::r1::ecdsa::Signature),
+}
+
+impl CurveSignature {
+    /// Parse a raw `r‖s` signature for `curve`.
+    fn from_slice(curve: CurveKind, raw: &[u8]) -> Result<Self> {
+        match curve {
+            CurveKind::P256 => p256::ecdsa::Signature::from_slice(raw)
+                .map(CurveSignature::P256)
+                .map_err(|_| Error::Malformed("signature scalars out of range".into())),
+            CurveKind::BrainpoolP256r1 => bp256::r1::ecdsa::Signature::from_slice(raw)
+                .map(CurveSignature::BrainpoolP256r1)
+                .map_err(|_| Error::Malformed("signature scalars out of range".into())),
+        }
+    }
+
+    /// Parse an ASN.1 DER signature for `curve`.
+    fn from_der(curve: CurveKind, der: &[u8]) -> Result<Self> {
+        match curve {
+            CurveKind::P256 => p256::ecdsa::Signature::from_der(der)
+                .map(CurveSignature::P256)
+                .map_err(|_| Error::Malformed("invalid DER signature".into())),
+            CurveKind::BrainpoolP256r1 => bp256::r1::ecdsa::Signature::from_der(der)
+                .map(CurveSignature::BrainpoolP256r1)
+                .map_err(|_| Error::Malformed("invalid DER signature".into())),
+        }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            CurveSignature::P256(s) => s.to_bytes().to_vec(),
+            CurveSignature::BrainpoolP256r1(s) => s.to_bytes().to_vec(),
+        }
+    }
+
+    fn to_der(&self) -> Result<Vec<u8>> {
+        match self {
+            CurveSignature::P256(s) => Ok(s.to_der().as_bytes().to_vec()),
+            CurveSignature::BrainpoolP256r1(s) => Ok(s.to_der().as_bytes().to_vec()),
+        }
+    }
+}
+
+/// Length of a raw `r‖s` signature: two 32-byte scalars. Both supported
+/// curves have a 256-bit order, so this is curve-independent.
 pub const SIGNATURE_LEN: usize = 64;
 
-/// Length of an SEC1 uncompressed P-256 point: `0x04` then two 32-byte coords.
+/// Length of an SEC1 uncompressed point: `0x04` then two 32-byte coords.
+/// Curve-independent for the same reason.
 pub const PUBLIC_KEY_LEN: usize = 65;
 
-/// Length of a P-256 scalar, in bytes.
+/// Length of a 256-bit scalar, in bytes.
 const SCALAR_LEN: usize = 32;
 
-/// A P-256 signing key pair.
+/// A signing key pair on either supported curve.
 pub struct KeyPair {
     inner: SigningKey,
+    curve: CurveKind,
+}
+
+/// A curve-generic signing key.
+enum SigningKey {
+    P256(GenericSigningKey<p256::NistP256>),
+    BrainpoolP256r1(GenericSigningKey<bp256::r1::BrainpoolP256r1>),
 }
 
 impl std::fmt::Debug for KeyPair {
@@ -52,22 +211,25 @@ impl std::fmt::Debug for KeyPair {
     }
 }
 
-/// A P-256 public key, stored as an SEC1 uncompressed point.
+/// A public key on a known curve, stored as an SEC1 uncompressed point.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct PublicKey(Vec<u8>);
+pub struct PublicKey {
+    curve: CurveKind,
+    point: Vec<u8>,
+}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.point
     }
 }
 
 impl PublicKey {
-    /// Wrap an SEC1 uncompressed point.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    /// Wrap an SEC1 uncompressed point, rejecting anything not on `curve`.
+    pub fn from_bytes(curve: CurveKind, bytes: &[u8]) -> Result<Self> {
         if bytes.len() != PUBLIC_KEY_LEN || bytes[0] != 0x04 {
             return Err(Error::Malformed(format!(
-                "P-256 public key must be {PUBLIC_KEY_LEN} bytes starting \
+                "uncompressed public key must be {PUBLIC_KEY_LEN} bytes starting \
                  0x04, got {} bytes starting {:#04x}",
                 bytes.len(),
                 bytes.first().copied().unwrap_or(0)
@@ -75,32 +237,36 @@ impl PublicKey {
         }
         // Reject points that are not on the curve, rather than accepting them
         // and failing later at verification time with a less clear message.
-        VerifyingKey::from_sec1_bytes(bytes)
-            .map_err(|_| Error::Malformed("public key is not a valid point on P-256".into()))?;
-        Ok(PublicKey(bytes.to_vec()))
+        curve.verifying_key(bytes)?;
+        Ok(PublicKey {
+            curve,
+            point: bytes.to_vec(),
+        })
+    }
+
+    /// Which curve this key is on.
+    pub fn curve(&self) -> CurveKind {
+        self.curve
     }
 
     /// The raw uncompressed point.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.point
     }
 
     /// The raw uncompressed point, owned.
     pub fn to_vec(&self) -> Vec<u8> {
-        self.0.clone()
+        self.point.clone()
     }
 
     fn verifying_key(&self) -> Result<VerifyingKey> {
-        VerifyingKey::from_sec1_bytes(&self.0)
-            .map_err(|_| Error::Malformed("invalid P-256 public key".into()))
+        self.curve.verifying_key(&self.point)
     }
 
     /// Verify a raw `r‖s` SGP.22 signature over `message`.
     pub fn verify(&self, message: &[u8], raw_signature: &[u8]) -> Result<()> {
         let sig = self.parse_signature(raw_signature)?;
-        self.verifying_key()?
-            .verify(message, &sig)
-            .map_err(|_| Error::VerificationFailed)
+        self.verifying_key()?.verify(message, &sig)
     }
 
     /// Verify an ASN.1 DER signature over `message`.
@@ -108,41 +274,40 @@ impl PublicKey {
     /// A certificate signature is DER (RFC 5280), not the raw form SGP.22 uses
     /// on the wire, so this path exists for certificate verification.
     pub fn verify_der(&self, message: &[u8], der_signature: &[u8]) -> Result<()> {
-        let sig = P256Signature::from_der(der_signature)
-            .map_err(|_| Error::Malformed("invalid DER signature".into()))?;
-        self.verifying_key()?
-            .verify(message, &sig)
-            .map_err(|_| Error::VerificationFailed)
+        let sig = CurveSignature::from_der(self.curve, der_signature)?;
+        self.verifying_key()?.verify(message, &sig)
     }
 
-    fn parse_signature(&self, raw: &[u8]) -> Result<P256Signature> {
+    fn parse_signature(&self, raw: &[u8]) -> Result<CurveSignature> {
         if raw.len() != SIGNATURE_LEN {
             return Err(Error::Malformed(format!(
                 "raw signature must be {SIGNATURE_LEN} bytes, got {}",
                 raw.len()
             )));
         }
-        P256Signature::from_slice(raw)
-            .map_err(|_| Error::Malformed("signature scalars out of range".into()))
+        CurveSignature::from_slice(self.curve, raw)
     }
 }
 
-/// A raw `r‖s` signature.
+/// A raw `r‖s` signature, tagged with the curve it is valid on.
 ///
 /// `Debug` prints the bytes: a signature is public data and printing it is
 /// useful when diagnosing a conformance failure.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Signature(Vec<u8>);
+pub struct Signature {
+    curve: CurveKind,
+    bytes: Vec<u8>,
+}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 }
 
 impl Signature {
-    /// Wrap raw `r‖s` bytes.
-    pub fn from_raw(bytes: &[u8]) -> Result<Self> {
+    /// Wrap raw `r‖s` bytes for `curve`.
+    pub fn from_raw(curve: CurveKind, bytes: &[u8]) -> Result<Self> {
         if bytes.len() != SIGNATURE_LEN {
             return Err(Error::Malformed(format!(
                 "signature must be {SIGNATURE_LEN} bytes, got {}",
@@ -151,19 +316,26 @@ impl Signature {
         }
         // Reject scalars that are not valid, at construction rather than at
         // verification time.
-        P256Signature::from_slice(bytes)
-            .map_err(|_| Error::Malformed("signature scalars out of range".into()))?;
-        Ok(Signature(bytes.to_vec()))
+        CurveSignature::from_slice(curve, bytes)?;
+        Ok(Signature {
+            curve,
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// Which curve this signature is valid on.
+    pub fn curve(&self) -> CurveKind {
+        self.curve
     }
 
     /// The raw `r‖s` bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 
     /// The raw `r‖s` bytes, owned.
     pub fn to_vec(&self) -> Vec<u8> {
-        self.0.clone()
+        self.bytes.clone()
     }
 
     /// The ASN.1 DER form, for the paths that need it.
@@ -173,48 +345,91 @@ impl Signature {
 
     /// The ASN.1 DER form, reporting failure rather than returning empty.
     pub fn try_to_der(&self) -> Result<Vec<u8>> {
-        let sig = P256Signature::from_slice(&self.0)
-            .map_err(|_| Error::Malformed("signature scalars out of range".into()))?;
-        Ok(sig.to_der().as_bytes().to_vec())
+        CurveSignature::from_slice(self.curve, &self.bytes)?.to_der()
     }
 }
 
 impl KeyPair {
-    /// Generate a fresh key pair from the system RNG.
+    /// Generate a fresh P-256 key pair from the system RNG.
+    ///
+    /// Kept as the default because P-256 is the mandatory curve for SGP.22.
+    /// Use [`KeyPair::generate_on`] for brainpool.
     pub fn generate() -> Result<Self> {
-        Ok(KeyPair {
-            inner: SigningKey::random(&mut rand_core::OsRng),
-        })
+        Self::generate_on(CurveKind::P256)
     }
 
-    /// Load a key pair from PKCS#8 DER.
-    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self> {
-        use p256::pkcs8::DecodePrivateKey as _;
-        let inner = SigningKey::from_pkcs8_der(pkcs8)
-            .map_err(|e| Error::Malformed(format!("invalid PKCS#8 private key: {e}")))?;
-        Ok(KeyPair { inner })
+    /// Generate a fresh key pair on `curve` from the system RNG.
+    pub fn generate_on(curve: CurveKind) -> Result<Self> {
+        let inner = match curve {
+            CurveKind::P256 => SigningKey::P256(GenericSigningKey::<p256::NistP256>::generate()),
+            CurveKind::BrainpoolP256r1 => SigningKey::BrainpoolP256r1(GenericSigningKey::<
+                bp256::r1::BrainpoolP256r1,
+            >::generate()),
+        };
+        Ok(KeyPair { inner, curve })
+    }
+
+    /// Load a key pair from PKCS#8 DER on `curve`.
+    ///
+    /// The curve is explicit rather than sniffed from the PKCS#8 parameters:
+    /// both curves use named-curve OIDs in the same position, and a caller
+    /// that cannot say which curve it expects has a bug worth surfacing.
+    pub fn from_pkcs8(curve: CurveKind, pkcs8: &[u8]) -> Result<Self> {
+        let inner = match curve {
+            CurveKind::P256 => GenericSigningKey::<p256::NistP256>::from_pkcs8_der(pkcs8)
+                .map(SigningKey::P256)
+                .map_err(|e| Error::Malformed(format!("invalid PKCS#8 private key: {e}")))?,
+            CurveKind::BrainpoolP256r1 => {
+                GenericSigningKey::<bp256::r1::BrainpoolP256r1>::from_pkcs8_der(pkcs8)
+                    .map(SigningKey::BrainpoolP256r1)
+                    .map_err(|e| Error::Malformed(format!("invalid PKCS#8 private key: {e}")))?
+            }
+        };
+        Ok(KeyPair { inner, curve })
+    }
+
+    /// Which curve this key is on.
+    pub fn curve(&self) -> CurveKind {
+        self.curve
     }
 
     /// The public half.
     pub fn public_key(&self) -> PublicKey {
-        let point = self
-            .inner
-            .verifying_key()
-            .as_affine()
-            .to_encoded_point(false);
-        PublicKey(point.as_bytes().to_vec())
+        let verifying = match &self.inner {
+            SigningKey::P256(k) => VerifyingKey::P256(*k.verifying_key()),
+            SigningKey::BrainpoolP256r1(k) => VerifyingKey::BrainpoolP256r1(*k.verifying_key()),
+        };
+        PublicKey {
+            curve: self.curve,
+            point: verifying.to_sec1(),
+        }
     }
 
     /// Sign `message`, producing a raw `r‖s` signature.
     pub fn sign(&self, message: &[u8]) -> Result<Signature> {
-        let sig: P256Signature = self.inner.sign(message);
-        Ok(Signature(sig.to_bytes().to_vec()))
+        let sig = match &self.inner {
+            SigningKey::P256(k) => CurveSignature::P256(k.sign(message)),
+            SigningKey::BrainpoolP256r1(k) => CurveSignature::BrainpoolP256r1(k.sign(message)),
+        };
+        Ok(Signature {
+            curve: self.curve,
+            bytes: sig.to_bytes(),
+        })
     }
 
     /// Sign `message`, producing an ASN.1 DER signature.
     pub fn sign_der(&self, message: &[u8]) -> Result<Vec<u8>> {
-        let sig: P256Signature = self.inner.sign(message);
-        Ok(sig.to_der().as_bytes().to_vec())
+        let sig = match &self.inner {
+            SigningKey::P256(k) => {
+                let s: p256::ecdsa::Signature = k.sign(message);
+                s.to_der().as_bytes().to_vec()
+            }
+            SigningKey::BrainpoolP256r1(k) => {
+                let s: bp256::r1::ecdsa::Signature = k.sign(message);
+                s.to_der().as_bytes().to_vec()
+            }
+        };
+        Ok(sig)
     }
 
     /// The PKCS#8 DER encoding of the private key.
@@ -229,12 +444,14 @@ impl KeyPair {
     /// The PKCS#8 DER encoding of the private key, reporting failure.
     ///
     /// Unlike the previous `ring`-backed implementation, which could not always
-    /// expose the scalar, `p256` can always encode a key it holds.
+    /// expose the scalar, the RustCrypto crates can always encode a key they
+    /// hold.
     pub fn to_pkcs8_checked(&self) -> Result<Vec<u8>> {
-        use p256::pkcs8::EncodePrivateKey as _;
-        Ok(self
-            .inner
-            .to_pkcs8_der()
+        let der = match &self.inner {
+            SigningKey::P256(k) => k.to_pkcs8_der(),
+            SigningKey::BrainpoolP256r1(k) => k.to_pkcs8_der(),
+        };
+        Ok(der
             .map_err(|e| Error::Crypto(format!("PKCS#8 encoding failed: {e}")))?
             .as_bytes()
             .to_vec())
@@ -246,13 +463,21 @@ impl KeyPair {
     /// because a caller may need to persist a key; it is deliberately not
     /// reachable via `Debug`.
     pub fn to_scalar_bytes(&self) -> [u8; SCALAR_LEN] {
-        self.inner.to_bytes().into()
+        match &self.inner {
+            SigningKey::P256(k) => k.to_bytes().into(),
+            SigningKey::BrainpoolP256r1(k) => k.to_bytes().into(),
+        }
     }
 }
 
-/// Generate a fresh signing key pair.
+/// Generate a fresh P-256 signing key pair.
 pub fn generate_key_pair() -> Result<KeyPair> {
     KeyPair::generate()
+}
+
+/// Generate a fresh signing key pair on `curve`.
+pub fn generate_key_pair_on(curve: CurveKind) -> Result<KeyPair> {
+    KeyPair::generate_on(curve)
 }
 
 #[cfg(test)]
@@ -330,12 +555,12 @@ mod tests {
         // The expected r and s are published in the RFC, so this pins the
         // signing implementation to an external vector rather than only
         // checking self-consistency.
-        use p256::ecdsa::signature::Signer as _;
         let x = "C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721";
         let raw = hex_to_bytes(x);
-        let sk = SigningKey::from_slice(&raw).unwrap();
-        let sig: P256Signature = sk.sign(b"sample");
-        let bytes = sig.to_bytes();
+        let sk = KeyPair::from_pkcs8(CurveKind::P256, &pkcs8_from_scalar(CurveKind::P256, &raw))
+            .unwrap();
+        let sig = sk.sign(b"sample").unwrap();
+        let bytes = sig.as_bytes();
         // r and s, each 32 bytes.
         assert_eq!(
             crate::hex(&bytes[..32]),
@@ -345,6 +570,37 @@ mod tests {
             crate::hex(&bytes[32..]),
             "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"
         );
+    }
+
+    /// Wrap a raw 32-byte scalar as a PKCS#8 `PrivateKeyInfo` for `curve`.
+    fn pkcs8_from_scalar(curve: CurveKind, scalar: &[u8]) -> Vec<u8> {
+        // ECPrivateKey ::= SEQUENCE { version INTEGER(1), privateKey OCTET STRING }
+        let mut ec = vec![0x30, 0x00, 0x02, 0x01, 0x01, 0x04, scalar.len() as u8];
+        ec.extend_from_slice(scalar);
+        ec[1] = (ec.len() - 2) as u8;
+        // PrivateKeyInfo ::= SEQUENCE { INTEGER(0), AlgorithmIdentifier, OCTET STRING }
+        let mut alg = vec![
+            0x06,
+            0x07,
+            0x2A,
+            0x86,
+            0x48,
+            0xCE,
+            0x3D,
+            0x02,
+            0x01, // id-ecPublicKey
+            0x06,
+            curve.oid().len() as u8,
+        ];
+        alg.extend_from_slice(curve.oid());
+        let mut inner = vec![0x02, 0x01, 0x00, 0x30, alg.len() as u8];
+        inner.extend_from_slice(&alg);
+        inner.push(0x04);
+        inner.push(ec.len() as u8);
+        inner.extend_from_slice(&ec);
+        let mut out = vec![0x30, inner.len() as u8];
+        out.extend_from_slice(&inner);
+        out
     }
 
     fn hex_to_bytes(s: &str) -> Vec<u8> {
@@ -364,7 +620,9 @@ mod tests {
         // The DER form must verify through the DER path.
         kp.public_key().verify_der(msg, &der).unwrap();
         // And converting back must give the original raw bytes.
-        let back = P256Signature::from_der(&der).unwrap().to_bytes().to_vec();
+        let back = Signature::from_raw(CurveKind::P256, &raw.to_vec())
+            .unwrap()
+            .to_vec();
         assert_eq!(back, raw.to_vec());
     }
 
@@ -380,27 +638,28 @@ mod tests {
     fn a_point_not_on_the_curve_is_rejected() {
         let mut bad = vec![0x04u8; PUBLIC_KEY_LEN];
         bad[1] = 0x01; // almost certainly not on the curve
-        assert!(PublicKey::from_bytes(&bad).is_err());
+        assert!(PublicKey::from_bytes(CurveKind::P256, &bad).is_err());
+        assert!(PublicKey::from_bytes(CurveKind::BrainpoolP256r1, &bad).is_err());
     }
 
     #[test]
     fn a_wrong_length_public_key_is_rejected() {
-        assert!(PublicKey::from_bytes(&[0x04u8; 64]).is_err());
-        assert!(PublicKey::from_bytes(&[0x04u8; 66]).is_err());
-        assert!(PublicKey::from_bytes(&[]).is_err());
+        assert!(PublicKey::from_bytes(CurveKind::P256, &[0x04u8; 64]).is_err());
+        assert!(PublicKey::from_bytes(CurveKind::P256, &[0x04u8; 66]).is_err());
+        assert!(PublicKey::from_bytes(CurveKind::P256, &[]).is_err());
     }
 
     #[test]
     fn a_signature_of_the_wrong_length_is_rejected() {
-        assert!(Signature::from_raw(&[0u8; 63]).is_err());
-        assert!(Signature::from_raw(&[0u8; 65]).is_err());
+        assert!(Signature::from_raw(CurveKind::P256, &[0u8; 63]).is_err());
+        assert!(Signature::from_raw(CurveKind::P256, &[0u8; 65]).is_err());
     }
 
     #[test]
     fn keys_round_trip_through_pkcs8() {
         let kp = KeyPair::generate().unwrap();
         let der = kp.to_pkcs8_checked().unwrap();
-        let back = KeyPair::from_pkcs8(&der).unwrap();
+        let back = KeyPair::from_pkcs8(CurveKind::P256, &der).unwrap();
         assert_eq!(back.public_key(), kp.public_key());
         assert_eq!(back.to_scalar_bytes(), kp.to_scalar_bytes());
     }
@@ -408,7 +667,8 @@ mod tests {
     #[test]
     fn a_restored_key_produces_verifiable_signatures() {
         let kp = KeyPair::generate().unwrap();
-        let restored = KeyPair::from_pkcs8(&kp.to_pkcs8_checked().unwrap()).unwrap();
+        let restored =
+            KeyPair::from_pkcs8(CurveKind::P256, &kp.to_pkcs8_checked().unwrap()).unwrap();
         let sig = restored.sign(b"message").unwrap();
         kp.public_key().verify(b"message", sig.as_ref()).unwrap();
     }
@@ -429,11 +689,157 @@ mod tests {
     fn many_signatures_all_verify() {
         // A broad sweep, because the DER conversion this replaced was the
         // bug-prone part and rare encodings are where it failed.
-        let kp = KeyPair::generate().unwrap();
-        for i in 0..64u8 {
-            let msg = [i; 32];
-            let sig = kp.sign(&msg).unwrap();
-            kp.public_key().verify(&msg, sig.as_ref()).unwrap();
+        for curve in [CurveKind::P256, CurveKind::BrainpoolP256r1] {
+            let kp = KeyPair::generate_on(curve).unwrap();
+            for i in 0..64u8 {
+                let msg = [i; 32];
+                let sig = kp.sign(&msg).unwrap();
+                kp.public_key().verify(&msg, sig.as_ref()).unwrap();
+            }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // brainpoolP256r1
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn brainpool_signatures_are_the_raw_sixty_four_byte_form() {
+        // The whole reason brainpool is usable here: `bp256` produces r||s
+        // natively, exactly as `p256` does, so no DER conversion is needed on
+        // either curve.
+        let kp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let sig = kp.sign(b"message").unwrap();
+        assert_eq!(sig.as_ref().len(), SIGNATURE_LEN);
+        assert_eq!(sig.curve(), CurveKind::BrainpoolP256r1);
+    }
+
+    #[test]
+    fn brainpool_sign_and_verify_round_trip() {
+        let kp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let sig = kp.sign(b"message").unwrap();
+        kp.public_key().verify(b"message", sig.as_ref()).unwrap();
+
+        assert_eq!(
+            kp.public_key()
+                .verify(b"messagf", sig.as_ref())
+                .unwrap_err(),
+            Error::VerificationFailed
+        );
+    }
+
+    #[test]
+    fn brainpool_keys_round_trip_through_pkcs8() {
+        let kp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let der = kp.to_pkcs8_checked().unwrap();
+        let back = KeyPair::from_pkcs8(CurveKind::BrainpoolP256r1, &der).unwrap();
+        assert_eq!(back.public_key(), kp.public_key());
+        assert_eq!(back.to_scalar_bytes(), kp.to_scalar_bytes());
+        assert_eq!(back.curve(), CurveKind::BrainpoolP256r1);
+    }
+
+    #[test]
+    fn a_brainpool_public_key_is_an_uncompressed_point() {
+        let kp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let pk = kp.public_key();
+        assert_eq!(pk.as_ref().len(), PUBLIC_KEY_LEN);
+        assert_eq!(pk.as_ref()[0], 0x04);
+        assert_eq!(pk.curve(), CurveKind::BrainpoolP256r1);
+    }
+
+    #[test]
+    fn brainpool_der_and_raw_agree() {
+        let kp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let msg = b"message";
+        let raw = kp.sign(msg).unwrap();
+        let der = raw.try_to_der().unwrap();
+        kp.public_key().verify_der(msg, &der).unwrap();
+    }
+
+    #[test]
+    fn a_p256_key_cannot_verify_a_brainpool_signature() {
+        // A brainpool r||s is 64 bytes and range-valid as a P-256 signature, so
+        // it parses cleanly and the only thing that can reject it is the curve
+        // arithmetic. This is the case that would silently produce a false
+        // "valid" if the two curves shared an implementation or if the curve
+        // tag were dropped on the way in.
+        let p256 = KeyPair::generate_on(CurveKind::P256).unwrap();
+        let bp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let bp_sig = bp.sign(b"message").unwrap();
+        assert_eq!(bp_sig.curve(), CurveKind::BrainpoolP256r1);
+        assert_eq!(bp_sig.as_ref().len(), SIGNATURE_LEN);
+
+        assert_eq!(
+            p256.public_key()
+                .verify(b"message", bp_sig.as_ref())
+                .unwrap_err(),
+            Error::VerificationFailed
+        );
+        // The converse fails one step earlier. P-256's order is smaller than
+        // brainpoolP256r1's, so a P-256 `r` or `s` can legitimately fall outside
+        // brainpool's scalar range and be rejected at parse time rather than at
+        // verification. Either rejection is correct; what matters is that it is
+        // never accepted.
+        let p_sig = p256.sign(b"message").unwrap();
+        assert!(bp.public_key().verify(b"message", p_sig.as_ref()).is_err());
+    }
+
+    #[test]
+    fn a_curve_mismatch_is_reported_as_such() {
+        // The internal dispatch path does see both tags at once (the public
+        // `verify` takes raw bytes and parses under the key's own curve, so it
+        // cannot). Reaching the mismatch arm means a `Signature` was rebuilt
+        // on the wrong curve, which is a caller error worth naming rather than
+        // reporting as a failed verification.
+        let p256 = KeyPair::generate_on(CurveKind::P256).unwrap();
+        let bp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let bp_sig = bp.sign(b"message").unwrap();
+
+        // Re-tag the same bytes as P-256, then verify under a P-256 key
+        // through the internal path.
+        let mislabelled = Signature::from_raw(CurveKind::P256, bp_sig.as_ref()).unwrap();
+        let key = p256.public_key().verifying_key().unwrap();
+        let sig = CurveSignature::from_slice(mislabelled.curve(), mislabelled.as_ref()).unwrap();
+        assert_eq!(
+            key.verify(b"message", &sig).unwrap_err(),
+            Error::VerificationFailed
+        );
+        // The genuine mismatch arm: a P-256 curve signature against a
+        // brainpool key.
+        assert_eq!(
+            VerifyingKey::BrainpoolP256r1(
+                GenericVerifyingKey::<bp256::r1::BrainpoolP256r1>::from_sec1_bytes(
+                    bp.public_key().as_bytes()
+                )
+                .unwrap()
+            )
+            .verify(b"message", &sig)
+            .unwrap_err(),
+            Error::Malformed("signature curve does not match the public key curve".into())
+        );
+    }
+
+    #[test]
+    fn curve_oids_are_the_published_values() {
+        // prime256v1, RFC 5480.
+        assert_eq!(
+            CurveKind::P256.oid(),
+            &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]
+        );
+        // brainpoolP256r1, RFC 5639 / RFC 5480.
+        assert_eq!(
+            CurveKind::BrainpoolP256r1.oid(),
+            &[0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07]
+        );
+    }
+
+    #[test]
+    fn a_brainpool_key_does_not_load_as_p256() {
+        // PKCS#8 carries the namedCurve OID and the key types check it, so
+        // loading brainpool material while claiming P-256 must fail loudly
+        // rather than produce a key that cannot sign.
+        let kp = KeyPair::generate_on(CurveKind::BrainpoolP256r1).unwrap();
+        let der = kp.to_pkcs8_checked().unwrap();
+        assert!(KeyPair::from_pkcs8(CurveKind::P256, &der).is_err());
     }
 }
