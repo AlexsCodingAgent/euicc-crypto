@@ -147,6 +147,27 @@ pub struct Sgp26VariantO {
     /// Kept as `Vec<u8>` rather than `Certificate` so that a certificate the library
     /// legitimately cannot represent is still available to a test that requires it.
     pub ds_auth_invalid_curve_cert_der: Option<Vec<u8>>,
+
+    /// The **valid** SM-DS authentication certificate, with the private key that matches it.
+    ///
+    /// §4.2.18's SM-DS error cases present a certificate that is fine and a request that is not
+    /// — a flipped `serverSignature1` byte, a wrong echoed challenge, an unheld CI identifier.
+    /// All of them need `serverSignature1` to be **correctly signed under the key this
+    /// certificate carries**, or the eUICC refuses on the signature first and reports
+    /// `invalidSignature` instead of the fault under test. That is what these two provide.
+    ///
+    /// The pair comes from `Variants A_B_C/Variant A`, not `Variant O`, and the two are not
+    /// interchangeable — pairing a certificate from one subtree with a key from the other
+    /// produces material that looks right and fails every signature check. Verified by
+    /// comparing public keys, not by filename.
+    pub ds_auth_cert: Option<Certificate>,
+
+    /// The private key matching [].
+    ///
+    /// Both halves are needed, and they must pair: a case that presents the certificate while
+    /// signing with some other key fails the signature check first and reports the wrong fault.
+    /// `the_ds_auth_certificate_and_key_pair` pins the pairing.
+    pub ds_auth_private: Option<KeyPair>,
 }
 
 impl CurveKind {
@@ -237,6 +258,17 @@ impl Sgp26VariantO {
             .ok()
             .and_then(|der| Certificate::from_der(&der).ok());
 
+        // The valid DSauth pair, from `Variants A_B_C/Variant A`. The certificate and the key
+        // must come from the *same* subtree: `Variant O`'s DSauth certificate has no private
+        // half published, and borrowing the key from the other tree yields a mismatch that
+        // only shows up as a signature failure deep inside a session.
+        let ds_auth_cert = read(&format!("CERT_S_SM_DSauth_VARA_SIG_{sfx}.der"))
+            .ok()
+            .and_then(|der| Certificate::from_der(&der).ok());
+        let ds_auth_private = read(&format!("SK_S_SM_DSauth_SIG_{sfx}.pem"))
+            .ok()
+            .and_then(|pem| private_key_from_pem(curve, &pem).ok());
+
         // Named `..._NIST192` / `..._BRP192`: the suffix is the *family* plus the size, not the
         // `<curve>` spelling the other fixtures use, so this does not go through `sfx`.
         let ds_auth_invalid_curve_cert_der = read(&format!(
@@ -275,6 +307,8 @@ impl Sgp26VariantO {
             dp_auth_cert,
             ds_auth_invalid_signature_cert,
             ds_auth_invalid_curve_cert_der,
+            ds_auth_cert,
+            ds_auth_private,
         })
     }
 
@@ -603,6 +637,30 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod new_fixture_tests {
     use super::*;
+
+    /// The DSauth certificate and its private key must actually pair.
+    ///
+    /// The two live in different subtrees of the published set — the certificate in
+    /// `Variants A_B_C/Variant A`, and `Variant O` publishes no private half at all — so it is
+    /// entirely possible to load a certificate and a key that do not belong together. The
+    /// result looks correct and fails every signature check, which surfaces as the *case* being
+    /// wrong rather than the fixture. Signing and verifying is the only way to tell.
+    #[test]
+    fn the_ds_auth_certificate_and_key_pair() {
+        let m = Sgp26VariantO::load_curve(crate::ecdsa::CurveKind::P256)
+            .expect("SGP.26 Variant O must load");
+        let cert = m.ds_auth_cert.as_ref().expect("DSauth certificate");
+        let key = m.ds_auth_private.as_ref().expect("DSauth private key");
+
+        let message = b"pairing check";
+        let signature = key.sign(message).expect("signing must succeed");
+        cert.public_key()
+            .verify(message, signature.as_ref())
+            .expect(
+                "the DSauth certificate's public key must verify a signature made by the DSauth \
+                 private key; if this fails the two came from different subtrees",
+            );
+    }
 
     /// Both SM-DS error certificates must load.
     ///
