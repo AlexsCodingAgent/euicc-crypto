@@ -106,6 +106,16 @@ pub struct Sgp26VariantO {
 
     /// `SK_S_SM_DPpb_ECDSA_<curve>.pem` — the key that signs `smdpSigned2`.
     pub dp_pb_private: Option<KeyPair>,
+
+    /// `CERT_S_SM_DPauth_ECDSA_<curve>.der` — the SM-DP+ authentication certificate.
+    ///
+    /// This is `CERT.DPauth.SIG`: the certificate an RSP session is authenticated with, and
+    /// the one `PrepareDownload` compares against the request's `smdpCertificate` under
+    /// SGP.22 §5.7.5's same-entity rule. It is a *different certificate* from
+    /// `CERT_S_SM_DPpb_ECDSA_<curve>.der` with the *same* subjectAltName — which is exactly
+    /// the relationship the rule tests, and the reason a session authenticated with the EUM
+    /// certificate is not a valid stand-in for one authenticated with this.
+    pub dp_auth_cert: Option<Certificate>,
 }
 
 impl CurveKind {
@@ -180,6 +190,14 @@ impl Sgp26VariantO {
         let dp_pb_private = read(&format!("SK_S_SM_DPpb_ECDSA_{sfx}.pem"))
             .ok()
             .and_then(|pem| private_key_from_pem(curve, &pem).ok());
+        // The authentication certificate may be named with or without the `DP` infix: the
+        // published set uses `CERT_S_SM_DPauth_ECDSA_<curve>.der` in `Variant O` and
+        // `CERT_S_SM_DP2auth_...` in the `Variants A_B_C` tree for the second DP. Try both
+        // rather than pinning one spelling.
+        let dp_auth_cert = ["CERT_S_SM_DPauth_ECDSA_", "CERT_S_SM_DP2auth_ECDSA_"]
+            .iter()
+            .find_map(|prefix| read(&format!("{prefix}{sfx}.der")).ok())
+            .and_then(|der| Certificate::from_der(&der).ok());
 
         Ok(Sgp26VariantO {
             curve,
@@ -204,6 +222,7 @@ impl Sgp26VariantO {
             eum_private,
             dp_pb,
             dp_pb_private,
+            dp_auth_cert,
         })
     }
 
