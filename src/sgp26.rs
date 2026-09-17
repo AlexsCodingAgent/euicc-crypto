@@ -135,7 +135,18 @@ pub struct Sgp26VariantO {
     /// `unsupportedCurve(3)` rather than `invalidCertificate(1)` — §5.7.4 gives the two codes
     /// for distinct conditions, and a well-formed certificate on a curve the card has no keys
     /// for is the former.
-    pub ds_auth_invalid_curve_cert: Option<Certificate>,
+    /// Raw DER, not a parsed [`Certificate`].
+    ///
+    /// This certificate's key is on **P-192**, and [`crate::ecdsa::CurveKind`] models only
+    /// P-256 and brainpoolP256r1 — so `Certificate::from_der` cannot parse it, because SPKI
+    /// extraction has no curve to return. That is not an obstacle to the case: §4.2.18
+    /// SM-DS_ErrorCases #03 sends the certificate and the *eUICC* must recognise the
+    /// unsupported curve and answer `unsupportedCurve(3)`. The fixture set only has to carry
+    /// the bytes.
+    ///
+    /// Kept as `Vec<u8>` rather than `Certificate` so that a certificate the library
+    /// legitimately cannot represent is still available to a test that requires it.
+    pub ds_auth_invalid_curve_cert_der: Option<Vec<u8>>,
 }
 
 impl CurveKind {
@@ -228,7 +239,7 @@ impl Sgp26VariantO {
 
         // Named `..._NIST192` / `..._BRP192`: the suffix is the *family* plus the size, not the
         // `<curve>` spelling the other fixtures use, so this does not go through `sfx`.
-        let ds_auth_invalid_curve_cert = read(&format!(
+        let ds_auth_invalid_curve_cert_der = read(&format!(
             "CERT_S_SM_DSauth_INV_CURVE_{}192.der",
             if matches!(curve, CurveKind::BrainpoolP256r1) {
                 "BRP"
@@ -236,8 +247,7 @@ impl Sgp26VariantO {
                 "NIST"
             }
         ))
-        .ok()
-        .and_then(|der| Certificate::from_der(&der).ok());
+        .ok();
 
         Ok(Sgp26VariantO {
             curve,
@@ -264,7 +274,7 @@ impl Sgp26VariantO {
             dp_pb_private,
             dp_auth_cert,
             ds_auth_invalid_signature_cert,
-            ds_auth_invalid_curve_cert,
+            ds_auth_invalid_curve_cert_der,
         })
     }
 
@@ -588,6 +598,32 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod new_fixture_tests {
+    use super::*;
+
+    /// Both SM-DS error certificates must load.
+    ///
+    /// `Sgp26VariantO::load()` returns `Err` if any required file is missing, and the caller
+    /// turns that into "no SGP.26 material" — so a fixture that fails to load does not surface
+    /// as a fixture error, it surfaces as *every* SGP.26-dependent case reporting that the
+    /// material is absent. That indirection is why this is pinned here.
+    #[test]
+    fn the_sm_ds_error_certificates_load() {
+        let m = Sgp26VariantO::load().expect("SGP.26 Variant O must load");
+        assert!(
+            m.ds_auth_invalid_signature_cert.is_some(),
+            "CERT_S_SM_DSauth_INV_SIGN_NIST.der must load"
+        );
+        // Raw DER: this certificate is on P-192, which `CurveKind` does not model, so it
+        // cannot be parsed into a `Certificate` — the bytes are what the case needs.
+        assert!(
+            m.ds_auth_invalid_curve_cert_der.is_some(),
+            "CERT_S_SM_DSauth_INV_CURVE_NIST192.der must load"
+        );
+    }
 }
 
 #[cfg(test)]
