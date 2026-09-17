@@ -39,6 +39,14 @@ pub struct TestPki {
     pub eum: KeyPair,
     /// The eUICC key pair.
     pub euicc: KeyPair,
+    /// The SM-DP+ Profile Package Binding key pair (`SK.DPpb.SIG`).
+    ///
+    /// Separate from the EUM pair because SGP.22 gives them different roles and different
+    /// certificates: a `PrepareDownload` carries `CERT.DPpb.SIG` in `smdpCertificate` and
+    /// signs `smdpSigned2` with `SK.DPpb.SIG`, while the session was authenticated by a
+    /// `CERT.DPauth.SIG`. Using one key for both made the two indistinguishable, and the
+    /// card's role checks are what surfaced it.
+    pub dp_pb: KeyPair,
     /// The eIM key pair.
     ///
     /// ESep has an eIM sign an eUICC Package which the eUICC then verifies
@@ -47,6 +55,8 @@ pub struct TestPki {
     /// EUM's: a test that used the EUM key would still pass if the eUICC
     /// verified against the wrong party.
     pub eim: KeyPair,
+    /// DER of the Profile Package Binding certificate (`CERT.DPpb.SIG`).
+    dp_pb_cert: Vec<u8>,
     eum_cert: Vec<u8>,
     euicc_cert: Vec<u8>,
     ci_cert: Vec<u8>,
@@ -99,6 +109,7 @@ impl TestPki {
         let ci = KeyPair::generate_on(curve)?;
         let eum = KeyPair::generate_on(curve)?;
         let euicc = KeyPair::generate_on(curve)?;
+        let dp_pb = KeyPair::generate_on(curve)?;
         let eim = KeyPair::generate_on(curve)?;
 
         // The CI public key identifier is a truncated SHA-256 of the CI public
@@ -148,9 +159,26 @@ impl TestPki {
             Some(RSP_ROLE_CI_OID),
         )?;
 
+        // The Profile Package Binding certificate. `smdpCertificate` is defined as
+        // `CERT.DPpb.SIG` (SGP.22 line 18009), so a `PrepareDownload` request must carry
+        // this one and not the EUM's.
+        //
+        // It names the **same entity** as the server certificate, per §5.7.5's same-entity
+        // rule: the DPauth and DPpb certificates are two certificates for one SM-DP+, which
+        // is why they share an OID in `subjectAltName` while carrying different roles.
+        let dp_pb_cert = build_certificate(
+            "dp-pb",
+            &dp_pb.public_key(),
+            &ci,
+            Some(EUM_SAN_OID),
+            Some(crate::x509::Certificate::OID_RSP_ROLE_DP_PB),
+        )?;
+
         Ok(TestPki {
             ci,
             eum,
+            dp_pb,
+            dp_pb_cert,
             euicc,
             eim,
             eum_cert,
@@ -158,6 +186,15 @@ impl TestPki {
             ci_cert,
             ci_pk_id,
         })
+    }
+
+    /// DER of the Profile Package Binding certificate (`CERT.DPpb.SIG`).
+    ///
+    /// `smdpCertificate` is defined as this certificate, and `smdpSigned2` is signed by
+    /// `SK.DPpb.SIG` — so a `PrepareDownload` request carries it while the session was
+    /// authenticated by a different certificate for the same entity.
+    pub fn dp_pb_cert_der(&self) -> &[u8] {
+        &self.dp_pb_cert
     }
 
     /// DER of the EUM certificate (`CERT.EUM.ECDSA`).
