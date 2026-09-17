@@ -531,31 +531,72 @@ mod tests {
     use super::*;
     use crate::testpki::TestPki;
 
-    /// The readers must extract *something* from a certificate that carries the
-    /// extensions.
+    /// The test PKI's certificates now carry both extensions.
     ///
-    /// `subject_alt_name` and `authority_key_identifier` return `Option`, so a check
-    /// built on them compares two values that may both be `None`. If the readers could
-    /// not find the extensions, the comparison would be vacuous and §4.2.10 #03 would
-    /// pass without reading a certificate at all.
-    ///
-    /// It must NOT use `TestPki`: those certificates carry **no extensions whatsoever**
-    /// (a 313-byte DER with neither `55 1D 11` nor `55 1D 23` anywhere), so they cannot
-    /// exercise these readers — an earlier version of this test used them and failed,
-    /// correctly. The readers are validated against the real SGP.26 corpus instead, in
-    /// `readers_work_on_the_sgp26_certificates`.
+    /// They did not, and that was a real limit rather than a detail: with no extensions
+    /// the readers returned `None`, a provider built on them reported "cannot judge", and
+    /// §4.2.10 #03/#08 were unreachable through the loopback suite — the reason #03 could
+    /// not be replayed even once the card-side check existed. `build_certificate` now
+    /// emits them, and this test is what keeps that true.
     #[test]
-    fn readers_are_absent_on_a_certificate_without_extensions() {
-        // The synthetic PKI is the useful negative case: the readers must report
-        // absence rather than scanning for a plausible-looking byte sequence.
+    fn the_test_pki_issues_certificates_with_the_compared_extensions() {
         let pki = TestPki::new();
-        let cert = Certificate::from_der(pki.eum_cert_der()).unwrap();
+        let eum = Certificate::from_der(pki.eum_cert_der()).unwrap();
+
+        let san = eum
+            .subject_alt_name()
+            .expect("the EUM certificate must name its entity");
+        assert!(!san.is_empty(), "subjectAltName must not be an empty value");
+
+        let aki = eum
+            .authority_key_identifier()
+            .expect("the EUM certificate must cite its issuer's key");
+        assert_eq!(aki.len(), 20, "a keyIdentifier is 160 bits, per RFC 5280");
+
+        // Two certificates from one issuer agree; the self-issued CI one does not, so
+        // the comparison is not satisfied by every pair.
+        let euicc = Certificate::from_der(pki.euicc_cert_der()).unwrap();
+        assert_eq!(
+            eum.authority_key_identifier(),
+            euicc.authority_key_identifier(),
+            "certificates issued by the same CA must cite the same key identifier"
+        );
+        // The CI is self-signed, so its authorityKeyIdentifier is its *own* key — the
+        // same one the EUM and eUICC certificates cite as their issuer. So the CI's AKI
+        // matching theirs is correct, not a defect, and an earlier version of this test
+        // asserted the opposite. What distinguishes a *different issuer* is checked in
+        // `readers_work_on_the_sgp26_certificates`, where the corpus has real chains.
+        let ci = Certificate::from_der(pki.ci_cert_der()).unwrap();
+        assert_eq!(
+            ci.authority_key_identifier(),
+            eum.authority_key_identifier(),
+            "the self-signed CI cites the same key its subjects cite as their issuer"
+        );
+
+        // And the entities are distinguishable, which is what #03 needs.
+        assert_ne!(
+            eum.subject_alt_name(),
+            euicc.subject_alt_name(),
+            "the EUM and the eUICC must name different entities"
+        );
+    }
+
+    /// A certificate issued with no entity name yields `None`, so "unreadable" is not
+    /// mistaken for "equal".
+    #[test]
+    fn a_certificate_without_subject_alt_name_yields_none() {
+        // `build_certificate` omits the extension when given no OID, which is the
+        // negative case a comparison must not treat as a match.
+        let pki = TestPki::new();
+        let bare = crate::testpki::build_certificate_without_entity_for_test(&pki);
+        let cert = Certificate::from_der(&bare).unwrap();
         assert_eq!(
             cert.subject_alt_name(),
             None,
-            "the test PKI's certificates carry no subjectAltName, so None is honest"
+            "no subjectAltName was issued, so None is the only honest answer"
         );
-        assert_eq!(cert.authority_key_identifier(), None);
+        // The authorityKeyIdentifier is still present: only the SAN is optional.
+        assert!(cert.authority_key_identifier().is_some());
     }
 
     /// The readers against the *real* SGP.26 certificates, and the §5.7.5 comparison.

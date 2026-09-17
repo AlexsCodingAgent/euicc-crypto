@@ -110,9 +110,9 @@ impl TestPki {
         // signed by the CI as well (in the test scheme the CI stands in for the
         // issuing authority). This gives a two-level chain whose signatures can
         // be checked with the primitives here.
-        let eum_cert = build_certificate("eum", &eum.public_key(), &ci)?;
-        let euicc_cert = build_certificate("euicc", &euicc.public_key(), &ci)?;
-        let ci_cert = build_certificate("ci", &ci.public_key(), &ci)?;
+        let eum_cert = build_certificate("eum", &eum.public_key(), &ci, Some(EUM_SAN_OID))?;
+        let euicc_cert = build_certificate("euicc", &euicc.public_key(), &ci, Some(EUICC_SAN_OID))?;
+        let ci_cert = build_certificate("ci", &ci.public_key(), &ci, Some(CI_SAN_OID))?;
 
         Ok(TestPki {
             ci,
@@ -168,12 +168,53 @@ impl TestPki {
     /// certificate for the SM-DP+'s own key, issued by the CI the eUICC trusts.
     /// The subject key is supplied rather than generated so the caller keeps
     /// the private half and can sign with it.
+    ///
+    /// The entity the certificate names is a parameter, because §4.2.10 #03 is about two
+    /// certificates naming *different* entities and a caller has to be able to produce
+    /// one. It defaults to the EUM's OID through [`Self::issue_for`]; see
+    /// [`Self::issue_for_entity`] to name something else.
     pub fn issue_for(&self, subject: &KeyPair, label: &str) -> Vec<u8> {
-        build_certificate(label, &subject.public_key(), &self.ci)
+        self.issue_for_entity(subject, label, EUM_SAN_OID)
+    }
+
+    /// Issue a certificate naming a given entity in `subjectAltName`.
+    ///
+    /// `san_oid` is the DER *content* of the `registeredID`, e.g. `[0x83, 0x37, 0x81,
+    /// 0x67]` for `2.999.231`. Two certificates issued for the same OID compare equal
+    /// under SGP.22 §5.7.5's same-entity rule; two for different OIDs do not.
+    pub fn issue_for_entity(&self, subject: &KeyPair, label: &str, san_oid: &[u8]) -> Vec<u8> {
+        build_certificate(label, &subject.public_key(), &self.ci, Some(san_oid))
             .expect("issuing a test certificate must succeed")
     }
 }
 
+/// Build a certificate with **no** `subjectAltName`, for the negative case.
+///
+/// A comparison that treated "cannot read the extension" as "equal" would pass the §5.7.5
+/// same-entity rule without reading anything, so the readers need an input that genuinely
+/// lacks the extension to prove they report absence rather than agreement. Kept here and
+/// used by `x509`'s tests.
+#[doc(hidden)]
+pub fn build_certificate_without_entity_for_test(pki: &TestPki) -> Vec<u8> {
+    build_certificate("no-san", &pki.eum.public_key(), &pki.ci, None)
+        .expect("issuing a test certificate must succeed")
+}
+
+/// Entity OIDs for `subjectAltName`, in DER content form.
+///
+/// SGP.26's real SM-DP+ certificates carry `registeredID` values `2.999.231` and
+/// `2.999.232` for two *different* entities, and this mirrors that shape: distinct OIDs
+/// for distinct entities. That is what makes a same-entity check falsifiable — if every
+/// certificate named the same thing, §4.2.10 #03 could not exist.
+///
+/// DER content for `2.999.<n>`: the first two arcs encode as `40*2 + 999 = 1079`, which
+/// needs two bytes (`0x83 0x37`); each later arc is base-128. So `2.999.231` is
+/// `83 37 81 67`.
+const EUM_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x67];
+const EUICC_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x68];
+const CI_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x69];
+
+/// Build a certificate signed by `issuer` for `subject_key`.
 /// Build a minimal self-issued X.509 certificate for `subject_key`, signed by
 /// `issuer`.
 ///
@@ -194,7 +235,12 @@ impl TestPki {
 ///   BIT STRING signatureValue
 /// }
 /// ```
-fn build_certificate(label: &str, subject_key: &PublicKey, issuer: &KeyPair) -> Result<Vec<u8>> {
+fn build_certificate(
+    label: &str,
+    subject_key: &PublicKey,
+    issuer: &KeyPair,
+    san_oid: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     const OID_ECDSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
     const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
     // A fixed UTC time so certificate generation is reproducible in structure.
@@ -256,6 +302,45 @@ fn build_certificate(label: &str, subject_key: &PublicKey, issuer: &KeyPair) -> 
         .concat(),
     );
 
+    // The two extensions SGP.22 §5.7.5 compares certificates on.
+    //
+    // `subjectAltName` is omitted when `san_oid` is `None`, keeping a certificate that
+    // names no entity distinguishable from one that does.
+    let mut extensions = Vec::new();
+
+    // authorityKeyIdentifier ::= SEQUENCE { keyIdentifier [0] IMPLICIT OCTET STRING }
+    //
+    // From the *issuer's* public key, so two certificates signed by the same CA agree
+    // and certificates from different CAs do not.
+    let aki = &sha256(issuer.public_key().as_ref())[..20];
+    extensions.push(tlv(
+        0x30,
+        &[
+            tlv(0x06, &[0x55, 0x1D, 0x23]), // id-ce-authorityKeyIdentifier
+            // extnValue is an OCTET STRING wrapping the extension value's own DER.
+            tlv(0x04, &tlv(0x30, &tlv(0x80, aki))),
+        ]
+        .concat(),
+    ));
+
+    if let Some(oid) = san_oid {
+        // SGP.22 §4.5.2.1.0.0 gives the form as "one single GeneralName entry, with
+        // value registeredID (8) = CI OID". `registeredID` is `[8]`, and its content is
+        // the OID's body rather than a wrapped OID TLV.
+        extensions.push(tlv(
+            0x30,
+            &[
+                tlv(0x06, &[0x55, 0x1D, 0x11]), // id-ce-subjectAltName
+                tlv(0x04, &tlv(0x30, &tlv(0x88, oid))),
+            ]
+            .concat(),
+        ));
+    }
+
+    // Extensions live under `[3] EXPLICIT` inside the TBS. `tlv` emits a single tag
+    // byte, and 0xA3 is a complete one-byte tag, so it is used directly.
+    let extensions = tlv(0xA3, &tlv(0x30, &extensions.concat()));
+
     let tbs = tlv(
         0x30,
         &[
@@ -266,6 +351,7 @@ fn build_certificate(label: &str, subject_key: &PublicKey, issuer: &KeyPair) -> 
             &validity,
             &name, // subject (self-issued)
             &spki,
+            &extensions,
         ]
         .concat(),
     );
