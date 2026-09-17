@@ -2,7 +2,7 @@
 //!
 //! # Why this exists next to [`crate::testpki::TestPki`]
 //!
-//! [`TestPki`] generates a *self-consistent* chain: real P-256 keys, real
+//! [`crate::testpki::TestPki`] generates a *self-consistent* chain: real P-256 keys, real
 //! signatures, but locally chosen identifiers. It exercises the code paths and
 //! can do nothing more, because the identifiers it invents are the ones the
 //! tests then look for. That is the failure mode this module removes — the
