@@ -183,6 +183,92 @@ impl Certificate {
         None
     }
 
+    /// The policy OIDs in the `certificatePolicies` extension, in DER content form.
+    ///
+    /// SGP.22 §4.5.2.1.0.0 requires an SM-DP+ Profile Package Binding certificate to carry
+    /// `id-rspRole-dp-pb` or `id-rspRole-dp-pb-v2` here, and §4.2.10 #08 is the case that
+    /// exercises the requirement. §5.7.5 makes verifying it obligatory via §4.5.2.2.
+    ///
+    /// Returns the OID *contents* without their `06 <len>` headers, one entry per policy,
+    /// which is what a caller compares against the expected role OID. An empty vector
+    /// means the extension was present but held no policies; `None` means the extension
+    /// could not be read — the two are different answers and a caller checking for a role
+    /// must treat both as "does not indicate the required role", while only the first is
+    /// evidence the certificate was well formed.
+    pub fn certificate_policies(&self) -> Option<Vec<Vec<u8>>> {
+        let ext = self.extension_value(Self::OID_CERTIFICATE_POLICIES)?;
+        // `certificatePolicies ::= SEQUENCE OF PolicyInformation`, and
+        // `PolicyInformation ::= SEQUENCE { policyIdentifier OBJECT IDENTIFIER, ... }`.
+        let list = Self::unwrap_sequence(ext)?;
+        let mut rest = list;
+        let mut out = Vec::new();
+        while !rest.is_empty() {
+            let Ok((tag, info, consumed)) = Self::read_tlv_consumed_checked(rest) else {
+                break;
+            };
+            rest = &rest[consumed..];
+            if tag != 0x30 {
+                continue;
+            }
+            // The first member of PolicyInformation is the OID; qualifiers may follow.
+            let Ok((oid_tag, oid_content, _)) = Self::read_tlv_consumed_checked(info) else {
+                continue;
+            };
+            if oid_tag == 0x06 {
+                out.push(oid_content.to_vec());
+            }
+        }
+        Some(out)
+    }
+
+    /// Like [`Self::read_tlv_consumed`] but reports a readable error rather than `None`.
+    ///
+    /// The `certificatePolicies` walk skips entries it does not understand, so it needs to
+    /// tell "this part is malformed" from "this is the end" — which `Option` collapses.
+    /// A malformed part is skipped rather than failing the whole read, because RFC 5280
+    /// allows qualifiers this reader does not model.
+    fn read_tlv_consumed_checked(buf: &[u8]) -> Result<(u8, &[u8], usize)> {
+        let tag = *buf
+            .first()
+            .ok_or_else(|| Error::Certificate("truncated".into()))?;
+        let len = *buf
+            .get(1)
+            .ok_or_else(|| Error::Certificate("truncated".into()))? as usize;
+        if len > 0x7F {
+            return Err(Error::Certificate("long-form length".into()));
+        }
+        let end = 2usize
+            .checked_add(len)
+            .ok_or_else(|| Error::Certificate("length overflow".into()))?;
+        if end > buf.len() {
+            return Err(Error::Certificate("truncated value".into()));
+        }
+        Ok((tag, &buf[2..end], end))
+    }
+
+    /// `id-ce-certificatePolicies`, `2.5.29.32`.
+    const OID_CERTIFICATE_POLICIES: &'static [u8] = &[0x06, 0x03, 0x55, 0x1D, 0x20];
+
+    /// `id-rspRole-dp-pb`, `2.23.146.1.2.1.0.0.1.2` — the role a Profile Package Binding
+    /// certificate must indicate (SGP.22 §4.5.2.1.0.0, and §4.2.10 #08's check).
+    pub const OID_RSP_ROLE_DP_PB: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x01, 0x02];
+
+    /// `id-rspRole-dp-pb-v2`, `2.23.146.1.2.1.5` — the other value §4.5.2.1.0.0 permits.
+    pub const OID_RSP_ROLE_DP_PB_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x05];
+
+    /// Whether this certificate indicates the Profile Package Binding role.
+    ///
+    /// True when `certificatePolicies` carries either permitted OID. `None` when the
+    /// extension cannot be read, which a caller must not treat as success: §4.2.10 #08
+    /// is precisely about a certificate that does *not* indicate the role.
+    pub fn indicates_dp_pb_role(&self) -> Option<bool> {
+        let policies = self.certificate_policies()?;
+        Some(policies.iter().any(|p| {
+            p.as_slice() == Self::OID_RSP_ROLE_DP_PB || p.as_slice() == Self::OID_RSP_ROLE_DP_PB_V2
+        }))
+    }
+
     /// `id-ce-subjectAltName`, `2.5.29.17`.
     const OID_SUBJECT_ALT_NAME: &'static [u8] = &[0x06, 0x03, 0x55, 0x1D, 0x11];
     /// `id-ce-authorityKeyIdentifier`, `2.5.29.35`.
@@ -597,6 +683,55 @@ mod tests {
         );
         // The authorityKeyIdentifier is still present: only the SAN is optional.
         assert!(cert.authority_key_identifier().is_some());
+    }
+
+    /// The `id-rspRole-dp-pb` check of §4.2.10 #08, against real certificates.
+    ///
+    /// The case is "the eUICC refuses any SM-DP+ Certificate for Profile Package Binding
+    /// that does not indicate 'id-rspRole-dp-pb' in its extension for Certificate
+    /// Policies". So the reader must return `true` for a real DPpb certificate and
+    /// `false` for one carrying a different role — otherwise the card's refusal could not
+    /// be attributed to the role OID.
+    #[test]
+    fn the_role_oid_is_read_from_real_certificates() {
+        const BASE: &str = "/home/agent/sgp26-variant-o/Variants A_B_C/Variant A/SM-DP+";
+        if !std::path::Path::new(BASE).exists() {
+            return;
+        }
+        let load = |sub: &str, name: &str| -> Option<Certificate> {
+            let der = std::fs::read(format!("{BASE}/{sub}/{name}")).ok()?;
+            Certificate::from_der(&der).ok()
+        };
+
+        // A Profile Package Binding certificate: MUST indicate the role.
+        let pb =
+            load("DPpb", "CERT_S_SM_DPpb_VARA_SIG_NIST.der").expect("the DPpb certificate parses");
+        let policies = pb
+            .certificate_policies()
+            .expect("the DPpb certificate carries certificatePolicies");
+        assert!(
+            !policies.is_empty(),
+            "the extension is present, so it must yield at least one policy"
+        );
+        assert_eq!(
+            pb.indicates_dp_pb_role(),
+            Some(true),
+            "a real DPpb certificate indicates id-rspRole-dp-pb"
+        );
+
+        // The authority certificate carries a *different* role OID, so it must answer
+        // false — this is what makes the check discriminating rather than always-true.
+        let auth = load("DPauth", "CERT_S_SM_DPauth_VARA_SIG_NIST.der")
+            .expect("the DPauth certificate parses");
+        assert_eq!(
+            auth.indicates_dp_pb_role(),
+            Some(false),
+            "a DPauth certificate carries id-rspRole-dp-auth, not the dp-pb role, so the \
+             card must not accept it as a Profile Package Binding certificate"
+        );
+
+        // Both readable, so the difference is in the value and not in parse success.
+        assert!(auth.certificate_policies().is_some());
     }
 
     /// The readers against the *real* SGP.26 certificates, and the §5.7.5 comparison.
