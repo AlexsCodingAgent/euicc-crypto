@@ -257,6 +257,128 @@ impl Certificate {
     /// `id-rspRole-dp-pb-v2`, `2.23.146.1.2.1.5` — the other value §4.5.2.1.0.0 permits.
     pub const OID_RSP_ROLE_DP_PB_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x05];
 
+    /// The RSP role OIDs a certificate may carry, per SGP.22 v3.1 §C.4 (lines 2296-2340).
+    ///
+    /// `id-rspRole = 2.23.146.1.2.1`, shared by every value, with the role in the final
+    /// arcs. Two sets exist: the Variant O / older arcs (`id-rspRole-dp-pb` etc.) and the
+    /// `-v2` arcs used in Variant Ov3 and OO certificates. A certificate carries one from
+    /// exactly one of the sets, which is why the readers below accept either.
+    ///
+    /// Each value here is checked against a real SGP.26 certificate in
+    /// `the_role_oids_match_real_certificates` — a wrong arc would produce a plausible-looking
+    /// OID that matches nothing, and the failure would read as "no role claims this" rather
+    /// than "the table is wrong". A blank line keeps this block separate from the first
+    /// constant's own doc, which would otherwise read as one comment.
+    ///
+    /// `id-rspRole-ci`, `2.23.146.1.2.1.0`.
+    pub const OID_RSP_ROLE_CI: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00];
+    /// `id-rspRole-ciSubCa`, `2.23.146.1.2.1.0.0`.
+    pub const OID_RSP_ROLE_CI_SUB_CA: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00];
+    /// `id-rspRole-eum`, `2.23.146.1.2.1.0.0.0`.
+    pub const OID_RSP_ROLE_EUM: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00];
+    /// `id-rspRole-eumSubCa`, `2.23.146.1.2.1.0.0.0.0`.
+    pub const OID_RSP_ROLE_EUM_SUB_CA: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00];
+    /// `id-rspRole-euicc`, `2.23.146.1.2.1.0.0.0.0.0`.
+    pub const OID_RSP_ROLE_EUICC: &'static [u8] = &[
+        0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    /// `id-rspRole-dpSubCa`, `2.23.146.1.2.1.0.0.1`.
+    pub const OID_RSP_ROLE_DP_SUB_CA: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x01];
+    /// `id-rspRole-dp-tls`, `2.23.146.1.2.1.0.0.1.0`.
+    pub const OID_RSP_ROLE_DP_TLS: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00];
+    /// `id-rspRole-dp-auth`, `2.23.146.1.2.1.0.0.1.1` — a `CERT.DPauth.SIG` role.
+    pub const OID_RSP_ROLE_DP_AUTH: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x01, 0x01];
+    /// `id-rspRole-dsSubCa`, `2.23.146.1.2.1.0.0.2`.
+    pub const OID_RSP_ROLE_DS_SUB_CA: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x02];
+    /// `id-rspRole-ds-tls`, `2.23.146.1.2.1.0.0.2.0`.
+    pub const OID_RSP_ROLE_DS_TLS: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x02, 0x00];
+    /// `id-rspRole-ds-auth`, `2.23.146.1.2.1.0.0.2.1` — a `CERT.DSauth.SIG` role.
+    pub const OID_RSP_ROLE_DS_AUTH: &'static [u8] =
+        &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x02, 0x01];
+    /// `id-rspRole-euicc-v2`, `2.23.146.1.2.1.1`.
+    pub const OID_RSP_ROLE_EUICC_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x01];
+    /// `id-rspRole-eum-v2`, `2.23.146.1.2.1.2`.
+    pub const OID_RSP_ROLE_EUM_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x02];
+    /// `id-rspRole-dp-tls-v2`, `2.23.146.1.2.1.3`.
+    pub const OID_RSP_ROLE_DP_TLS_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x03];
+    /// `id-rspRole-dp-auth-v2`, `2.23.146.1.2.1.4` — the Variant Ov3 `CERT.DPauth.SIG` role.
+    pub const OID_RSP_ROLE_DP_AUTH_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x04];
+    /// `id-rspRole-ds-tls-v2`, `2.23.146.1.2.1.6`.
+    pub const OID_RSP_ROLE_DS_TLS_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x06];
+    /// `id-rspRole-ds-auth-v2`, `2.23.146.1.2.1.7` — the Variant Ov3 `CERT.DSauth.SIG` role.
+    pub const OID_RSP_ROLE_DS_AUTH_V2: &'static [u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x07];
+
+    /// Every role OID this specification defines, both arc sets.
+    ///
+    /// Exposed so a caller can ask "is this certificate's role one of *the* roles", which is
+    /// what §4.2.18 #06 needs: the card must reject a certificate whose `certificatePolicies`
+    /// names none of these, not merely one that is not the role it expected.
+    pub const RSP_ROLE_OIDS: &'static [&'static [u8]] = &[
+        Self::OID_RSP_ROLE_CI,
+        Self::OID_RSP_ROLE_CI_SUB_CA,
+        Self::OID_RSP_ROLE_EUM,
+        Self::OID_RSP_ROLE_EUM_SUB_CA,
+        Self::OID_RSP_ROLE_EUICC,
+        Self::OID_RSP_ROLE_DP_SUB_CA,
+        Self::OID_RSP_ROLE_DP_TLS,
+        Self::OID_RSP_ROLE_DP_AUTH,
+        Self::OID_RSP_ROLE_DP_PB,
+        Self::OID_RSP_ROLE_DS_SUB_CA,
+        Self::OID_RSP_ROLE_DS_TLS,
+        Self::OID_RSP_ROLE_DS_AUTH,
+        Self::OID_RSP_ROLE_EUICC_V2,
+        Self::OID_RSP_ROLE_EUM_V2,
+        Self::OID_RSP_ROLE_DP_TLS_V2,
+        Self::OID_RSP_ROLE_DP_AUTH_V2,
+        Self::OID_RSP_ROLE_DP_PB_V2,
+        Self::OID_RSP_ROLE_DS_TLS_V2,
+        Self::OID_RSP_ROLE_DS_AUTH_V2,
+    ];
+
+    /// The role OIDs this certificate's `certificatePolicies` carries.
+    ///
+    /// `None` when the extension cannot be read; an empty vector when it is present but
+    /// carries no role OID at all. The two are different, and §4.2.18 #06 is about the
+    /// latter: a certificate with no `id-rspRole` value is not a DPauth or DSauth certificate.
+    pub fn rsp_roles(&self) -> Option<Vec<Vec<u8>>> {
+        let policies = self.certificate_policies()?;
+        Some(
+            policies
+                .into_iter()
+                .filter(|p| Self::RSP_ROLE_OIDS.iter().any(|r| r == &p.as_slice()))
+                .collect(),
+        )
+    }
+
+    /// Whether this certificate is a server certificate the eUICC may authenticate — i.e. a
+    /// `CERT.DPauth.SIG` or `CERT.DSauth.SIG`.
+    ///
+    /// SGP.22 v3.1 §5.7.13, "ES10b.AuthenticateServer":
+    ///
+    ///   "Verify that the RSP Server Certificate is either a CERT.DPauth.SIG or a
+    ///    CERT.DSauth.SIG, as described in section 4.5.2.2. Otherwise, the eUICC SHALL return
+    ///    an invalidOid error code."
+    ///
+    /// `None` when the extension cannot be read — a caller must not read that as agreement,
+    /// since the whole point is that the role has to be *found*.
+    pub fn is_server_certificate_role(&self) -> Option<bool> {
+        let roles = self.rsp_roles()?;
+        Some(roles.iter().any(|r| {
+            r.as_slice() == Self::OID_RSP_ROLE_DP_AUTH
+                || r.as_slice() == Self::OID_RSP_ROLE_DP_AUTH_V2
+                || r.as_slice() == Self::OID_RSP_ROLE_DS_AUTH
+                || r.as_slice() == Self::OID_RSP_ROLE_DS_AUTH_V2
+        }))
+    }
+
     /// Whether this certificate indicates the Profile Package Binding role.
     ///
     /// True when `certificatePolicies` carries either permitted OID. `None` when the
@@ -692,6 +814,84 @@ mod tests {
     /// Policies". So the reader must return `true` for a real DPpb certificate and
     /// `false` for one carrying a different role — otherwise the card's refusal could not
     /// be attributed to the role OID.
+    /// Every role OID in the table is checked against a real certificate.
+    ///
+    /// A wrong arc yields a plausible-looking OID that matches nothing, and the failure would
+    /// read as "no role claims this" rather than "the table is wrong" — so the table is
+    /// validated in both directions: each certificate claims its own role, and claims no
+    /// other. Without the second half a reader returning a constant would pass.
+    #[test]
+    fn the_role_oids_match_real_certificates() {
+        const DIR: &str = "/home/agent/repos/euicc-crypto/fixtures/sgp26/variant-o";
+        let load = |name: &str| -> Option<Certificate> {
+            let der = std::fs::read(format!("{DIR}/{name}")).ok()?;
+            Certificate::from_der(&der).ok()
+        };
+
+        let cases: [(&str, &[u8], bool); 3] = [
+            (
+                "CERT_S_SM_DPpb_ECDSA_NIST.der",
+                Certificate::OID_RSP_ROLE_DP_PB_V2,
+                false,
+            ),
+            (
+                "CERT_S_SM_DPauth_ECDSA_NIST.der",
+                Certificate::OID_RSP_ROLE_DP_AUTH_V2,
+                true,
+            ),
+            (
+                "CERT_EUM_ECDSA_NIST.der",
+                Certificate::OID_RSP_ROLE_EUM_V2,
+                false,
+            ),
+        ];
+
+        let mut checked = 0;
+        for (name, expected_role, is_server) in cases {
+            let Some(cert) = load(name) else { continue };
+            let roles = cert
+                .rsp_roles()
+                .unwrap_or_else(|| panic!("{name} carries no readable certificatePolicies"));
+
+            assert!(
+                roles.iter().any(|r| r.as_slice() == expected_role),
+                "{name} must claim its own role: expected {expected_role:02X?}, got {roles:02X?}"
+            );
+            assert_eq!(
+                roles.len(),
+                1,
+                "{name} must claim exactly one role, got {roles:02X?}"
+            );
+            assert_eq!(
+                cert.is_server_certificate_role(),
+                Some(is_server),
+                "{name}: SGP.22 section 5.7.13 accepts only CERT.DPauth.SIG or CERT.DSauth.SIG"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no fixture certificate was checked");
+    }
+
+    /// A certificate carrying a role that is not a server role claims no server role.
+    ///
+    /// The boundary the invalidOid case has to get right: the certificate is not missing the
+    /// extension, it simply does not hold the role the operation requires.
+    #[test]
+    fn a_non_server_role_is_not_accepted() {
+        const DIR: &str = "/home/agent/repos/euicc-crypto/fixtures/sgp26/variant-o";
+        let path = format!("{DIR}/CERT_CI_ECDSA_NIST.der");
+        let Ok(der) = std::fs::read(&path) else {
+            return;
+        };
+        let cert = Certificate::from_der(&der).expect("CERT.CI must parse");
+        assert_eq!(
+            cert.is_server_certificate_role(),
+            Some(false),
+            "CERT.CI is neither a CERT.DPauth.SIG nor a CERT.DSauth.SIG and must be refused \
+             under the invalidOid rule"
+        );
+    }
+
     #[test]
     fn the_role_oid_is_read_from_real_certificates() {
         const BASE: &str = "/home/agent/sgp26-variant-o/Variants A_B_C/Variant A/SM-DP+";
