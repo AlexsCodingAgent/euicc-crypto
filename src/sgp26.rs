@@ -168,6 +168,20 @@ pub struct Sgp26VariantO {
     /// signing with some other key fails the signature check first and reports the wrong fault.
     /// `the_ds_auth_certificate_and_key_pair` pins the pairing.
     pub ds_auth_private: Option<KeyPair>,
+
+    /// The **DPpb** certificate presented where a DPauth one is required, with its key.
+    ///
+    /// §4.2.18 SM-DP+_ErrorCases #06 is *defined* as this substitution — SGP.23-1's sequence
+    /// says "Choose the #CERT_S_SM_DPpb_SIG (instead of #CERT_S_SM_DPauth_SIG)". The
+    /// certificate is entirely valid and correctly signed; its **role** is what is wrong, so
+    /// the eUICC must answer `invalidOid(5)` rather than `invalidCertificate(1)` (§5.7.13
+    /// distinguishes the two, and §4.5.2.2 is where the roles come from).
+    ///
+    /// This is a real published certificate, not a locally minted stand-in, which matters:
+    /// the role lives in the `certificatePolicies` extension and only the published set
+    /// exercises the OID as it is actually written.
+    pub dp_pb_as_auth_cert: Option<Certificate>,
+    pub dp_pb_as_auth_private: Option<KeyPair>,
 }
 
 impl CurveKind {
@@ -258,6 +272,16 @@ impl Sgp26VariantO {
             .ok()
             .and_then(|der| Certificate::from_der(&der).ok());
 
+        // The DPpb certificate, used as a wrong-role stand-in by SM-DP+_ErrorCases #06. Same
+        // subtree as the DSauth pair above, and the same rule applies: certificate and key
+        // travel together (`the_dp_pb_as_auth_certificate_and_key_pair` pins the pairing).
+        let dp_pb_as_auth_cert = read(&format!("CERT_S_SM_DPpb_VARA_SIG_{sfx}.der"))
+            .ok()
+            .and_then(|der| Certificate::from_der(&der).ok());
+        let dp_pb_as_auth_private = read(&format!("SK_S_SM_DPpb_SIG_{sfx}.pem"))
+            .ok()
+            .and_then(|pem| private_key_from_pem(curve, &pem).ok());
+
         // The valid DSauth pair, from `Variants A_B_C/Variant A`. The certificate and the key
         // must come from the *same* subtree: `Variant O`'s DSauth certificate has no private
         // half published, and borrowing the key from the other tree yields a mismatch that
@@ -309,6 +333,8 @@ impl Sgp26VariantO {
             ds_auth_invalid_curve_cert_der,
             ds_auth_cert,
             ds_auth_private,
+            dp_pb_as_auth_cert,
+            dp_pb_as_auth_private,
         })
     }
 
@@ -637,6 +663,50 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod new_fixture_tests {
     use super::*;
+
+    /// The wrong-role certificate and its key must pair, and its role must be **DPpb**.
+    ///
+    /// The second half is the point of the case: if this certificate carried the DPauth role it
+    /// would be a correct authentication certificate and SM-DP+_ErrorCases #06 would have
+    /// nothing to refuse. Asserting the role here means a fixture that silently changed role
+    /// fails at the fixture rather than turning the case into a tautology.
+    #[test]
+    fn the_dp_pb_as_auth_certificate_and_key_pair() {
+        let m = Sgp26VariantO::load_curve(crate::ecdsa::CurveKind::P256)
+            .expect("SGP.26 Variant O must load");
+        let cert = m.dp_pb_as_auth_cert.as_ref().expect("the DPpb certificate");
+        let key = m
+            .dp_pb_as_auth_private
+            .as_ref()
+            .expect("the DPpb private key");
+
+        let message = b"pairing check";
+        let signature = key.sign(message).expect("signing must succeed");
+        cert.public_key()
+            .verify(message, signature.as_ref())
+            .expect("the DPpb certificate's public key must verify a signature made by its key");
+
+        // The role is the point: a DPauth certificate here would be a *correct* authentication
+        // certificate and the case would have nothing to refuse. Asserting the role means a
+        // fixture that silently changed role fails at the fixture rather than turning the case
+        // into a tautology.
+        let roles = cert
+            .rsp_roles()
+            .expect("the certificate must carry RSP roles");
+        assert!(
+            roles
+                .iter()
+                .any(|r| r.as_slice() == crate::x509::Certificate::OID_RSP_ROLE_DP_PB),
+            "this certificate must carry the DPpb role, which is what makes it the wrong \
+             certificate for an authentication session; got {roles:02X?}"
+        );
+        assert_eq!(
+            cert.is_server_certificate_role(),
+            Some(false),
+            "if it claimed a server role the case would be testing nothing — the card has to \
+             refuse it for its role, not accept it"
+        );
+    }
 
     /// The DSauth certificate and its private key must actually pair.
     ///
