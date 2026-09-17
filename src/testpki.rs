@@ -110,9 +110,30 @@ impl TestPki {
         // signed by the CI as well (in the test scheme the CI stands in for the
         // issuing authority). This gives a two-level chain whose signatures can
         // be checked with the primitives here.
-        let eum_cert = build_certificate("eum", &eum.public_key(), &ci, Some(EUM_SAN_OID))?;
-        let euicc_cert = build_certificate("euicc", &euicc.public_key(), &ci, Some(EUICC_SAN_OID))?;
-        let ci_cert = build_certificate("ci", &ci.public_key(), &ci, Some(CI_SAN_OID))?;
+        // The EUM stands in for the SM-DP+ that presents a Profile Package Binding
+        // certificate, so it is given that role: every case that authenticates a session
+        // with it and sends a PrepareDownload should reach the checks after the role one.
+        let eum_cert = build_certificate(
+            "eum",
+            &eum.public_key(),
+            &ci,
+            Some(EUM_SAN_OID),
+            Some(crate::x509::Certificate::OID_RSP_ROLE_DP_PB),
+        )?;
+        let euicc_cert = build_certificate(
+            "euicc",
+            &euicc.public_key(),
+            &ci,
+            Some(EUICC_SAN_OID),
+            Some(RSP_ROLE_EUICC_OID),
+        )?;
+        let ci_cert = build_certificate(
+            "ci",
+            &ci.public_key(),
+            &ci,
+            Some(CI_SAN_OID),
+            Some(RSP_ROLE_CI_OID),
+        )?;
 
         Ok(TestPki {
             ci,
@@ -183,8 +204,31 @@ impl TestPki {
     /// 0x67]` for `2.999.231`. Two certificates issued for the same OID compare equal
     /// under SGP.22 §5.7.5's same-entity rule; two for different OIDs do not.
     pub fn issue_for_entity(&self, subject: &KeyPair, label: &str, san_oid: &[u8]) -> Vec<u8> {
-        build_certificate(label, &subject.public_key(), &self.ci, Some(san_oid))
-            .expect("issuing a test certificate must succeed")
+        build_certificate(
+            label,
+            &subject.public_key(),
+            &self.ci,
+            Some(san_oid),
+            Some(crate::x509::Certificate::OID_RSP_ROLE_DP_PB),
+        )
+        .expect("issuing a test certificate must succeed")
+    }
+
+    /// Issue a certificate carrying a given `certificatePolicies` role OID.
+    ///
+    /// §4.2.10 #08 is about a Profile Package Binding certificate whose role is *wrong*,
+    /// so a caller has to be able to produce one. `role_oid` is the OID content, e.g.
+    /// [`crate::x509::Certificate::OID_RSP_ROLE_DP_PB`] or, for the violation, a
+    /// different role such as `id-rspRole-dp-auth`.
+    pub fn issue_with_role(&self, subject: &KeyPair, label: &str, role_oid: &[u8]) -> Vec<u8> {
+        build_certificate(
+            label,
+            &subject.public_key(),
+            &self.ci,
+            Some(EUM_SAN_OID),
+            Some(role_oid),
+        )
+        .expect("issuing a test certificate must succeed")
     }
 }
 
@@ -196,8 +240,14 @@ impl TestPki {
 /// used by `x509`'s tests.
 #[doc(hidden)]
 pub fn build_certificate_without_entity_for_test(pki: &TestPki) -> Vec<u8> {
-    build_certificate("no-san", &pki.eum.public_key(), &pki.ci, None)
-        .expect("issuing a test certificate must succeed")
+    build_certificate(
+        "no-san",
+        &pki.eum.public_key(),
+        &pki.ci,
+        None,
+        Some(crate::x509::Certificate::OID_RSP_ROLE_DP_PB),
+    )
+    .expect("issuing a test certificate must succeed")
 }
 
 /// Entity OIDs for `subjectAltName`, in DER content form.
@@ -210,6 +260,14 @@ pub fn build_certificate_without_entity_for_test(pki: &TestPki) -> Vec<u8> {
 /// DER content for `2.999.<n>`: the first two arcs encode as `40*2 + 999 = 1079`, which
 /// needs two bytes (`0x83 0x37`); each later arc is base-128. So `2.999.231` is
 /// `83 37 81 67`.
+/// `id-rspRole-euicc`, `2.23.146.1.2.1.0.0.0.0.0` — the eUICC certificate's role.
+const RSP_ROLE_EUICC_OID: &[u8] = &[
+    0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// `id-rspRole-ciSubCa`, `2.23.146.1.2.1.0.0` — the CI certificate's role.
+const RSP_ROLE_CI_OID: &[u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00];
+
 const EUM_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x67];
 const EUICC_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x68];
 const CI_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x69];
@@ -240,6 +298,7 @@ fn build_certificate(
     subject_key: &PublicKey,
     issuer: &KeyPair,
     san_oid: Option<&[u8]>,
+    role_oid: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     const OID_ECDSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
     const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
@@ -322,6 +381,25 @@ fn build_certificate(
         ]
         .concat(),
     ));
+
+    if let Some(role) = role_oid {
+        // certificatePolicies ::= SEQUENCE OF PolicyInformation, and
+        // PolicyInformation ::= SEQUENCE { policyIdentifier OBJECT IDENTIFIER }.
+        //
+        // SGP.22 §4.5.2.1.0.0 requires this extension to be `critical = true` for these
+        // certificates and gives the value as a single role OID. `role` is the OID's
+        // *content*, so the `06 <len>` header is added here.
+        let policy_oid = tlv(0x06, role);
+        extensions.push(tlv(
+            0x30,
+            &[
+                tlv(0x06, &[0x55, 0x1D, 0x20]), // id-ce-certificatePolicies
+                tlv(0x01, &[0xFF]),             // critical = TRUE
+                tlv(0x04, &tlv(0x30, &tlv(0x30, &policy_oid))),
+            ]
+            .concat(),
+        ));
+    }
 
     if let Some(oid) = san_oid {
         // SGP.22 §4.5.2.1.0.0 gives the form as "one single GeneralName entry, with

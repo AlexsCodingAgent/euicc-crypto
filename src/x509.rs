@@ -734,6 +734,51 @@ mod tests {
         assert!(auth.certificate_policies().is_some());
     }
 
+    /// The generated certificates carry a readable `certificatePolicies` role.
+    ///
+    /// §4.2.10 #08 needs a certificate whose role is wrong, and the generated set carried
+    /// no policy extension at all before this — so the reader answered `None` and the case
+    /// was unreachable. Both directions are asserted, since a reader that always answered
+    /// `true` would pass the positive case alone.
+    #[test]
+    fn the_generated_role_oid_is_readable_and_discriminating() {
+        let pki = TestPki::new();
+
+        let binding = Certificate::from_der(pki.eum_cert_der()).unwrap();
+        assert_eq!(
+            binding.indicates_dp_pb_role(),
+            Some(true),
+            "the EUM certificate is issued with the Profile Package Binding role"
+        );
+
+        let euicc = Certificate::from_der(pki.euicc_cert_der()).unwrap();
+        assert_eq!(
+            euicc.indicates_dp_pb_role(),
+            Some(false),
+            "the eUICC certificate carries id-rspRole-euicc, so it must not be accepted as \
+             a Profile Package Binding certificate"
+        );
+
+        // And a certificate issued explicitly with a *different* role is rejected, which
+        // is the #08 violation itself.
+        let wrong = pki.issue_with_role(
+            &pki.eum,
+            "wrong-role",
+            // id-rspRole-dp-auth, 2.23.146.1.2.1.0.0.1.1 — an authority certificate.
+            &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x01, 0x01],
+        );
+        let wrong = Certificate::from_der(&wrong).unwrap();
+        assert_eq!(
+            wrong.indicates_dp_pb_role(),
+            Some(false),
+            "a certificate naming the dp-auth role must not satisfy the dp-pb requirement"
+        );
+        assert!(
+            wrong.certificate_policies().is_some(),
+            "the extension is present and readable, so the false is about the value"
+        );
+    }
+
     /// The readers against the *real* SGP.26 certificates, and the §5.7.5 comparison.
     ///
     /// `PrepareDownload` must check that `CERT.DPauth.SIG` and `CERT.DPpb.SIG` belong to
