@@ -169,6 +169,31 @@ impl Certificate {
     /// (`authorityCertIssuer`, `authorityCertSerialNumber`) are not a key identifier and
     /// are not accepted in its place: returning one would make an unrelated pair of
     /// certificates compare equal.
+    /// This certificate's own Subject Key Identifier, from its `subjectKeyIdentifier`
+    /// extension.
+    ///
+    /// The counterpart of [`Self::authority_key_identifier`]: a certificate's AKI names its
+    /// issuer's SKI, so chain selection matches the two. `None` when the extension is absent,
+    /// which means this certificate cannot be selected as an issuer by that route.
+    pub fn subject_key_identifier(&self) -> Option<Vec<u8>> {
+        // `subjectKeyIdentifier` is `2.5.29.14`. `extension_value` has already stripped the
+        // `extnValue` OCTET STRING, so what remains is the KeyIdentifier: itself an OCTET
+        // STRING holding the twenty bytes.
+        const OID: &[u8] = &[0x55, 0x1D, 0x0E];
+        let ext = self.extension_value(OID)?;
+        let (tag, key_id) = Self::read_tlv(ext)?;
+        if tag != 0x04 {
+            return None;
+        }
+        Some(key_id.to_vec())
+    }
+
+    /// This certificate's Authority Key Identifier, from its `authorityKeyIdentifier`
+    /// extension.
+    ///
+    /// Names the **issuer's** Subject Key Identifier, which is how a chain is selected without
+    /// trusting the issuer *name* — a string an attacker controls. See
+    /// [`Self::subject_key_identifier`] for the other half of that comparison.
     pub fn authority_key_identifier(&self) -> Option<Vec<u8>> {
         let ext = self.extension_value(Self::OID_AUTHORITY_KEY_IDENTIFIER)?;
         let seq = Self::unwrap_sequence(ext)?;
@@ -820,6 +845,52 @@ mod tests {
     /// read as "no role claims this" rather than "the table is wrong" — so the table is
     /// validated in both directions: each certificate claims its own role, and claims no
     /// other. Without the second half a reader returning a constant would pass.
+    /// A certificate whose signature does not verify must be rejected.
+    ///
+    /// `CERT_S_SM_DSauth_INV_SIGN_NIST.der` is published by GSMA with a deliberately invalid
+    /// signature, and OpenSSL agrees: "certificate signature failure". This asserts the same
+    /// thing of `verify_signed_by_key`, against the CI the certificate's own Authority Key
+    /// Identifier names — which is what makes it a meaningful check rather than a comparison
+    /// against an arbitrary key.
+    #[test]
+    fn an_invalid_certificate_signature_is_rejected() {
+        const DIR: &str = crate::sgp26::Sgp26VariantO::DIR;
+        let load = |name: &str| -> Certificate {
+            let der = std::fs::read(format!("{DIR}/{name}"))
+                .unwrap_or_else(|e| panic!("fixture {name}: {e}"));
+            Certificate::from_der(&der).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+        };
+
+        let inv = load("CERT_S_SM_DSauth_INV_SIGN_NIST.der");
+        let ci = load("CERT_CI_ECDSA_NIST.der");
+
+        // The certificate names this CI as its issuer, so this is the key the check must use.
+        assert!(
+            inv.verify_signed_by(&ci).is_err(),
+            "the published invalid-signature certificate must not verify under its own issuer"
+        );
+
+        // And a valid one must still verify, so the check is not simply always failing.
+        let good = load("CERT_S_SM_DPauth_ECDSA_NIST.der");
+        assert!(
+            good.verify_signed_by(&ci).is_ok(),
+            "a valid certificate must verify under the same CI"
+        );
+
+        // And the SKI/AKI pair must match, which is what selects the anchor during chain
+        // verification. If these disagreed, the published invalid-signature certificate would
+        // be checked against the wrong key and the check would be meaningless.
+        assert_eq!(
+            inv.authority_key_identifier().as_deref(),
+            ci.subject_key_identifier().as_deref(),
+            "the certificate's AKI must name its issuer's SKI"
+        );
+        assert!(
+            ci.subject_key_identifier().is_some(),
+            "the CI certificate must carry a subjectKeyIdentifier to be selectable"
+        );
+    }
+
     #[test]
     fn the_role_oids_match_real_certificates() {
         // Resolved from the crate root, not an absolute path: an absolute path exists on the
