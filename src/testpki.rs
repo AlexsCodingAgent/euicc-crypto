@@ -113,12 +113,25 @@ impl TestPki {
         // The EUM stands in for the SM-DP+ that presents a Profile Package Binding
         // certificate, so it is given that role: every case that authenticates a session
         // with it and sends a PrepareDownload should reach the checks after the role one.
+        // The EUM certificate carries a **server** role, not a Profile Package Binding one.
+        //
+        // It is what these tests present as the RSP Server Certificate (see
+        // `server_material` in the IPAd harness), and SGP.22 v3.1 §5.7.13 requires that
+        // certificate to be "either a CERT.DPauth.SIG or a CERT.DSauth.SIG". Giving it
+        // `id-rspRole-dp-pb` — as this did until the card began checking — made the test
+        // PKI internally inconsistent: a certificate named after the EUM while claiming the
+        // profile-binding role, presented as an authentication certificate.
+        //
+        // `id-rspRole-dp-auth` is the DP-side role, which is what an SM-DP+ session
+        // authenticates with. Real SGP.26 material uses the `-v2` arm; the test PKI uses
+        // the older arc and both are accepted by the reader, which is itself worth
+        // exercising.
         let eum_cert = build_certificate(
             "eum",
             &eum.public_key(),
             &ci,
             Some(EUM_SAN_OID),
-            Some(crate::x509::Certificate::OID_RSP_ROLE_DP_PB),
+            Some(RSP_ROLE_DP_AUTH_OID),
         )?;
         let euicc_cert = build_certificate(
             "euicc",
@@ -267,6 +280,18 @@ const RSP_ROLE_EUICC_OID: &[u8] = &[
 
 /// `id-rspRole-ciSubCa`, `2.23.146.1.2.1.0.0` — the CI certificate's role.
 const RSP_ROLE_CI_OID: &[u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00];
+
+/// `id-rspRole-dp-auth`, `2.23.146.1.2.1.0.0.1.1` — the DP-side server role.
+///
+/// The EUM certificate carries this because these tests present it as the RSP Server
+/// Certificate, which §5.7.13 requires to be a `CERT.DPauth.SIG` or `CERT.DSauth.SIG`. It
+/// carried `id-rspRole-dp-pb` until the card began checking, which made it a certificate
+/// named after the EUM while claiming the profile-binding role.
+///
+/// Derived from SGP.22 v3.1 lines 2296-2340 and checked against real material: the
+/// `-v2` form (`2.23.146.1.2.1.4`, `...02 01 04`) is what SGP.26's certificates use, and
+/// `Certificate::OID_RSP_ROLE_DP_AUTH` is the same arc's older arm.
+const RSP_ROLE_DP_AUTH_OID: &[u8] = &[0x67, 0x81, 0x12, 0x01, 0x02, 0x01, 0x00, 0x00, 0x01, 0x01];
 
 const EUM_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x67];
 const EUICC_SAN_OID: &[u8] = &[0x83, 0x37, 0x81, 0x68];

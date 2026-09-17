@@ -944,11 +944,28 @@ mod tests {
     fn the_generated_role_oid_is_readable_and_discriminating() {
         let pki = TestPki::new();
 
-        let binding = Certificate::from_der(pki.eum_cert_der()).unwrap();
+        // The generated set no longer contains a Profile Package Binding certificate: the
+        // EUM certificate used to carry that role, which made it a certificate named after
+        // the EUM while claiming the profile-binding role, presented as the RSP Server
+        // Certificate. §5.7.13 requires that certificate to be a CERT.DPauth.SIG, so it now
+        // carries `id-rspRole-dp-auth`. The DP-pb reader is exercised against real SGP.26
+        // material in `the_role_oid_is_read_from_real_certificates` instead.
+        //
+        // What still matters here is that the reader discriminates rather than answering a
+        // constant, so the server certificate is asserted to be a server role and *not* a
+        // Profile Package Binding one.
+        let server = Certificate::from_der(pki.eum_cert_der()).unwrap();
         assert_eq!(
-            binding.indicates_dp_pb_role(),
+            server.is_server_certificate_role(),
             Some(true),
-            "the EUM certificate is issued with the Profile Package Binding role"
+            "the EUM certificate is what the tests present as the RSP Server Certificate, so \
+             it must carry a CERT.DPauth.SIG role"
+        );
+        assert_eq!(
+            server.indicates_dp_pb_role(),
+            Some(false),
+            "and it must not claim the Profile Package Binding role, which is a different \
+             certificate's purpose"
         );
 
         let euicc = Certificate::from_der(pki.euicc_cert_der()).unwrap();
