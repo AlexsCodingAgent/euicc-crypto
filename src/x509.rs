@@ -831,7 +831,7 @@ mod tests {
             Certificate::from_der(&der).ok()
         };
 
-        let cases: [(&str, &[u8], bool); 3] = [
+        let cases: [(&str, &[u8], bool); 4] = [
             (
                 "CERT_S_SM_DPpb_ECDSA_NIST.der",
                 Certificate::OID_RSP_ROLE_DP_PB_V2,
@@ -846,6 +846,17 @@ mod tests {
                 "CERT_EUM_ECDSA_NIST.der",
                 Certificate::OID_RSP_ROLE_EUM_V2,
                 false,
+            ),
+            // §4.2.18 SM-DS_ErrorCases #01's certificate. Held to the same standard as the
+            // others even though the case expects it to be *refused*: the refusal must be for
+            // the invalid signature the case is about, so the role has to be right. A
+            // certificate that also carried the wrong role would be refused for the wrong
+            // reason and the case would prove nothing — which is exactly the trap the SM-DP+
+            // error cases fell into.
+            (
+                "CERT_S_SM_DSauth_INV_SIGN_NIST.der",
+                Certificate::OID_RSP_ROLE_DS_AUTH_V2,
+                true,
             ),
         ];
 

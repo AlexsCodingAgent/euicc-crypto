@@ -116,6 +116,16 @@ pub struct Sgp26VariantO {
     /// the relationship the rule tests, and the reason a session authenticated with the EUM
     /// certificate is not a valid stand-in for one authenticated with this.
     pub dp_auth_cert: Option<Certificate>,
+
+    /// `CERT_S_SM_DSauth_INV_SIGN_<curve>.der` — an SM-DS authentication certificate whose
+    /// signature is invalid.
+    ///
+    /// §4.2.18 SM-DS_ErrorCases #01 names this file exactly. It is deliberately the *wrong*
+    /// certificate for the case: the certificate is a well-formed `CERT.DSauth.SIG` on the
+    /// right curve, and it is the signature over it that does not verify. That is what makes
+    /// the case about a bad certificate rather than about a wrong role — and it is why the
+    /// card must return `invalidCertificate`, not `invalidOid`, when it is presented.
+    pub ds_auth_invalid_signature_cert: Option<Certificate>,
 }
 
 impl CurveKind {
@@ -199,6 +209,13 @@ impl Sgp26VariantO {
             .find_map(|prefix| read(&format!("{prefix}{sfx}.der")).ok())
             .and_then(|der| Certificate::from_der(&der).ok());
 
+        // The invalid-signature certificate is in `Invalid Test Cases/`, which is a
+        // different subtree from the rest of the fixture set, so it is loaded by its own
+        // name rather than through the `sfx` pattern.
+        let ds_auth_invalid_signature_cert = read(&format!("CERT_S_SM_DSauth_INV_SIGN_{sfx}.der"))
+            .ok()
+            .and_then(|der| Certificate::from_der(&der).ok());
+
         Ok(Sgp26VariantO {
             curve,
             ci: Certificate::from_der(&read(&format!("CERT_CI_ECDSA_{sfx}.der"))?)?,
@@ -223,6 +240,7 @@ impl Sgp26VariantO {
             dp_pb,
             dp_pb_private,
             dp_auth_cert,
+            ds_auth_invalid_signature_cert,
         })
     }
 
