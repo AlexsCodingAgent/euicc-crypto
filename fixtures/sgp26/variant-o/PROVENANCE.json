@@ -1,0 +1,41 @@
+{
+  "files": [
+    {
+      "file": "SK_EUM_ECDSA_BRP.pem",
+      "pairs_with": "CERT_EUM_ECDSA_BRP.der",
+      "source": "EUM/SK_EUM_ECDSA_BRP.pem",
+      "spki_sha256_prefix": "bf74b40b9ab5bab3bb711e90"
+    },
+    {
+      "file": "SK_EUM_ECDSA_NIST.pem",
+      "pairs_with": "CERT_EUM_ECDSA_NIST.der",
+      "source": "EUM/SK_EUM_ECDSA_NIST.pem",
+      "spki_sha256_prefix": "f3c7702288ccd8d034b76d5a"
+    },
+    {
+      "file": "SK_S_SM_DPpb_ECDSA_BRP.pem",
+      "pairs_with": "CERT_S_SM_DPpb_ECDSA_BRP.der",
+      "source": "SM-DP+/DPpb/SK_S_SM_DPpb_ECDSA_BRP.pem",
+      "spki_sha256_prefix": "564a0eb17ee17c19da5d0f16"
+    },
+    {
+      "file": "SK_S_SM_DPpb_ECDSA_NIST.pem",
+      "pairs_with": "CERT_S_SM_DPpb_ECDSA_NIST.der",
+      "source": "SM-DP+/DPpb/SK_S_SM_DPpb_ECDSA_NIST.pem",
+      "spki_sha256_prefix": "c3e078394df49827bbbbd17b"
+    },
+    {
+      "file": "SK_S_SM_DPauth_ECDSA_BRP.pem",
+      "pairs_with": "CERT_S_SM_DPauth_ECDSA_BRP.der",
+      "source": "SM-DP+/DPauth/SK_S_SM_DPauth_ECDSA_BRP.pem",
+      "spki_sha256_prefix": "0f1c5c299af3086c559e1f90"
+    },
+    {
+      "file": "SK_S_SM_DPauth_ECDSA_NIST.pem",
+      "pairs_with": "CERT_S_SM_DPauth_ECDSA_NIST.der",
+      "source": "SM-DP+/DPauth/SK_S_SM_DPauth_ECDSA_NIST.pem",
+      "spki_sha256_prefix": "1106ac4d2738ca867f078425"
+    }
+  ],
+  "source_directory": "SGP.26 Variant O, Valid Test Cases"
+}

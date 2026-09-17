@@ -89,6 +89,23 @@ pub struct Sgp26VariantO {
     pub dp_auth_public: Option<PublicKey>,
     /// `SK_S_SM_DPauth_ECDSA_<curve>.pem` — the SM-DP+ authentication key.
     pub dp_auth_private: Option<KeyPair>,
+
+    /// `SK_EUM_ECDSA_<curve>.pem` — the EUM's signing key.
+    ///
+    /// `CERT_EUM_ECDSA_<curve>.der` is the certificate the eUICC trusts for an SM-DP+
+    /// session (`CERT.DPauth.SIG`), so a sequence that must authenticate a session the way
+    /// the published material intends needs this half. `None` when the subset omits it.
+    pub eum_private: Option<KeyPair>,
+
+    /// `CERT_S_SM_DPpb_ECDSA_<curve>.der` — the SM-DP+ Profile Package Binding
+    /// certificate.
+    ///
+    /// This is `CERT.DPpb.SIG`: the `smdpCertificate` in `PrepareDownload` and the key
+    /// `smdpSignature2` is verified under.
+    pub dp_pb: Option<Certificate>,
+
+    /// `SK_S_SM_DPpb_ECDSA_<curve>.pem` — the key that signs `smdpSigned2`.
+    pub dp_pb_private: Option<KeyPair>,
 }
 
 impl CurveKind {
@@ -151,6 +168,19 @@ impl Sgp26VariantO {
             .ok()
             .and_then(|pem| private_key_from_pem(curve, &pem).ok());
 
+        // The EUM's private half and the Profile Package Binding pair. Optional for the
+        // same reason as the authentication pair above: a subset need not carry every
+        // file, and `verify` is where a caller that needs one finds out it is wrong.
+        let eum_private = read(&format!("SK_EUM_ECDSA_{sfx}.pem"))
+            .ok()
+            .and_then(|pem| private_key_from_pem(curve, &pem).ok());
+        let dp_pb = read(&format!("CERT_S_SM_DPpb_ECDSA_{sfx}.der"))
+            .ok()
+            .and_then(|der| Certificate::from_der(&der).ok());
+        let dp_pb_private = read(&format!("SK_S_SM_DPpb_ECDSA_{sfx}.pem"))
+            .ok()
+            .and_then(|pem| private_key_from_pem(curve, &pem).ok());
+
         Ok(Sgp26VariantO {
             curve,
             ci: Certificate::from_der(&read(&format!("CERT_CI_ECDSA_{sfx}.der"))?)?,
@@ -171,6 +201,9 @@ impl Sgp26VariantO {
             )?,
             dp_auth_public,
             dp_auth_private,
+            eum_private,
+            dp_pb,
+            dp_pb_private,
         })
     }
 
@@ -202,6 +235,36 @@ impl Sgp26VariantO {
             return Err(crate::Error::Certificate(
                 "SK_S_EIMsign_ECDSA_NIST.pem does not match PK_S_EIMsign_ECDSA_NIST.pem".into(),
             ));
+        }
+        // A present-but-mismatched key is the failure worth catching: it parses, it
+        // signs, and the eUICC rejects the result for a reason that looks like a protocol
+        // bug. Absence is fine (a subset need not carry every file), so each check is
+        // skipped when either half is missing.
+        if let Some(k) = &self.eum_private {
+            if k.public_key().as_ref() != self.eum.public_key().as_ref() {
+                return Err(crate::Error::Certificate(format!(
+                    "SK_EUM_ECDSA_{sfx}.pem does not match the key in CERT_EUM_ECDSA_{sfx}.der",
+                    sfx = self.curve.sgp26_suffix()
+                )));
+            }
+        }
+        if let (Some(k), Some(cert)) = (&self.dp_pb_private, &self.dp_pb) {
+            if k.public_key().as_ref() != cert.public_key().as_ref() {
+                return Err(crate::Error::Certificate(format!(
+                    "SK_S_SM_DPpb_ECDSA_{sfx}.pem does not match the key in \
+                     CERT_S_SM_DPpb_ECDSA_{sfx}.der",
+                    sfx = self.curve.sgp26_suffix()
+                )));
+            }
+            // And the binding certificate must carry the role §4.5.2.1.0.0 requires,
+            // since a sequence presenting it would otherwise be refused for its role and
+            // the failure would be attributed to whatever the sequence was testing.
+            if cert.indicates_dp_pb_role() == Some(false) {
+                return Err(crate::Error::Certificate(format!(
+                    "CERT_S_SM_DPpb_ECDSA_{sfx}.der does not indicate id-rspRole-dp-pb",
+                    sfx = self.curve.sgp26_suffix()
+                )));
+            }
         }
         Ok(())
     }
@@ -479,6 +542,145 @@ mod tests {
     }
 
     /// The whole chain verifies: eUICC←EUM←CI, and the key matches its cert.
+    /// Every fixture private key pairs with the certificate it is filed against.
+    ///
+    /// The keys were added from `SGP.26 Variant O, Valid Test Cases`, and `PROVENANCE.json`
+    /// records each one's `pairs_with` and the SHA-256 prefix of its public key. Checking
+    /// the pairing here — rather than trusting the copy — is what makes the manifest
+    /// meaningful: a key taken from a different sub-CA still parses and still signs, and
+    /// the eUICC then rejects the result for a reason that reads as a protocol bug. That
+    /// is exactly the mistake the wrong-subtree search made, and it went unnoticed because
+    /// nothing compared the pairs.
+    ///
+    /// The manifest is read with a hand-rolled scan rather than a JSON parser: this crate
+    /// has no serde dependency and one small fixed-format file does not justify adding one.
+    #[test]
+    fn every_fixture_key_pairs_with_its_certificate() {
+        let dir = std::path::Path::new(Sgp26VariantO::DIR);
+        let manifest = dir.join("PROVENANCE.json");
+        if !manifest.exists() {
+            // A fixture shipped without the manifest is not an error for a crate
+            // consumer; there is simply nothing to cross-check.
+            return;
+        }
+        let raw = std::fs::read_to_string(&manifest).expect("PROVENANCE.json is readable");
+
+        // Pull out each `"file"` / `"pairs_with"` pair, in order. The file is generated
+        // and its shape is fixed, so a scan for the two keys is sufficient and fails
+        // loudly rather than silently if the shape changes.
+        let field = |key: &str, from: usize| -> Option<(String, usize)> {
+            let needle = format!("\"{key}\":");
+            let at = raw[from..].find(&needle)? + from + needle.len();
+            let open = raw[at..].find('"')? + at + 1;
+            let close = raw[open..].find('"')? + open;
+            Some((raw[open..close].to_owned(), close))
+        };
+
+        let mut cursor = 0;
+        let mut checked = 0;
+        while let Some((file, after_file)) = field("file", cursor) {
+            let Some((pairs_with, after_cert)) = field("pairs_with", after_file) else {
+                break;
+            };
+            cursor = after_cert;
+
+            let key_path = dir.join(&file);
+            let cert_path = dir.join(&pairs_with);
+            assert!(key_path.exists(), "{file} is in the manifest but missing");
+            assert!(
+                cert_path.exists(),
+                "{pairs_with} is in the manifest but missing"
+            );
+
+            // `_BRP` names brainpool; anything else in this fixture is P-256.
+            let curve = if file.contains("_BRP") {
+                CurveKind::BrainpoolP256r1
+            } else {
+                CurveKind::P256
+            };
+            let pem = std::fs::read(&key_path).expect("the key file is readable");
+            let key = private_key_from_pem(curve, &pem)
+                .unwrap_or_else(|e| panic!("{file} must parse as a {curve:?} key: {e}"));
+            let der = std::fs::read(&cert_path).expect("the certificate file is readable");
+            let cert = Certificate::from_der(&der)
+                .unwrap_or_else(|e| panic!("{pairs_with} must parse: {e}"));
+
+            assert_eq!(
+                key.public_key().as_ref(),
+                cert.public_key().as_ref(),
+                "{file} does not pair with {pairs_with} — the fixture would sign with a \
+                 key the eUICC cannot verify against that certificate"
+            );
+            checked += 1;
+        }
+
+        assert!(
+            checked >= 6,
+            "expected the six added BRP and NIST key pairs to be checked, checked {checked}"
+        );
+    }
+
+    /// The brainpool Variant O material carries everything a BRP sequence needs.
+    ///
+    /// A BRP `PrepareDownload` has to sign `smdpSigned2` under the key
+    /// `CERT_S_SM_DPpb_ECDSA_BRP.der` authenticates, and authenticate the session with the
+    /// EUM's. Neither half was in the fixture, so the BRP sequences were scaffolds.
+    ///
+    /// This asserts the whole set rather than the files' presence, because a file that is
+    /// present and does not pair is worse than a missing one: it signs, and the eUICC
+    /// rejects the result for a reason that reads as a protocol bug.
+    #[test]
+    fn the_brainpool_material_carries_the_signing_keys() {
+        let brp = Sgp26VariantO::load_curve(CurveKind::BrainpoolP256r1)
+            .expect("the brainpool Variant O material must load");
+        brp.verify()
+            .expect("the brainpool material must be internally consistent");
+
+        assert_eq!(brp.curve, CurveKind::BrainpoolP256r1);
+        assert_eq!(brp.curve.sgp26_suffix(), "BRP");
+
+        let eum_key = brp
+            .eum_private
+            .as_ref()
+            .expect("SK_EUM_ECDSA_BRP.pem — without it no BRP session can be authenticated");
+        assert_eq!(
+            eum_key.public_key().as_ref(),
+            brp.eum.public_key().as_ref(),
+            "the EUM private key must be the one CERT_EUM_ECDSA_BRP.der certifies"
+        );
+
+        let pb_cert = brp
+            .dp_pb
+            .as_ref()
+            .expect("CERT_S_SM_DPpb_ECDSA_BRP.der — the certificate PrepareDownload presents");
+        let pb_key = brp
+            .dp_pb_private
+            .as_ref()
+            .expect("SK_S_SM_DPpb_ECDSA_BRP.pem — the key smdpSignature2 is signed with");
+        assert_eq!(
+            pb_key.public_key().as_ref(),
+            pb_cert.public_key().as_ref(),
+            "the binding key must match the binding certificate"
+        );
+
+        // The certificate must carry the binding role, or a sequence presenting it would
+        // be refused by the §4.2.10 #08 check the suite itself asserts.
+        assert_eq!(
+            pb_cert.indicates_dp_pb_role(),
+            Some(true),
+            "CERT_S_SM_DPpb_ECDSA_BRP.der must indicate id-rspRole-dp-pb"
+        );
+
+        // And the two curves must be genuinely different material, not one set renamed —
+        // the distinction the whole BRP group exists to test.
+        let nist = Sgp26VariantO::load_curve(CurveKind::P256).unwrap();
+        assert_ne!(
+            brp.euicc.public_key().as_ref(),
+            nist.euicc.public_key().as_ref(),
+            "the BRP and NIST material must not be the same certificate"
+        );
+    }
+
     #[test]
     fn the_published_chain_is_internally_consistent() {
         let v = Sgp26VariantO::load().unwrap();
