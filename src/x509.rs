@@ -653,6 +653,69 @@ fn curve_from_algorithm_identifier(alg: &[u8]) -> Result<CurveKind> {
     }
 }
 
+/// The `namedCurve` OID a certificate declares, **without** requiring a supported curve.
+///
+/// [`Certificate::from_der`] fails on a certificate whose key is on a curve this crate does not
+/// model, because SPKI extraction has no [`crate::ecdsa::CurveKind`] to return. That is the
+/// right behaviour for a key-handling API and the wrong one for §4.2.18 SM-DS_ErrorCases #03:
+/// an eUICC must recognise a certificate on an **unsupported** curve and answer
+/// `unsupportedCurve(3)`, which means reading the OID precisely when it is not one the card
+/// knows.
+///
+/// So this walks `Certificate -> tbsCertificate -> SPKI -> AlgorithmIdentifier -> parameters`
+/// and returns the OID's contents verbatim, whatever it is. `None` only when the structure does
+/// not parse; an unrecognised curve is a value, not an error, because that is the answer the
+/// caller is looking for.
+pub fn certificate_named_curve_oid(der: &[u8]) -> Option<Vec<u8>> {
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+    let (_, cert, _) = read_tlv_any(der).ok()?;
+    let (_, tbs, _) = read_tlv_any(cert).ok()?;
+
+    // Walk tbsCertificate's top-level members looking for `SubjectPublicKeyInfo`, which is the
+    // SEQUENCE whose *first child* is itself a SEQUENCE holding id-ecPublicKey. The nesting is
+    // one level deeper than the SPKI's own members: the SPKI is
+    //   SEQUENCE { AlgorithmIdentifier, BIT STRING }
+    // and the OIDs live inside the AlgorithmIdentifier, not beside it.
+    //
+    // Verified against the published P-192 certificate, whose SPKI is
+    //   `30 13 06 07 2A 86 48 CE 3D 02 01 06 08 2A 86 48 CE 3D 03 01 01`
+    // — the second OID being prime192v1.
+    let mut rest = tbs;
+    while !rest.is_empty() {
+        let (tag, value, used) = read_tlv_any(rest).ok()?;
+        rest = &rest[used..];
+        if tag != 0x30 {
+            continue;
+        }
+        // First child of the SPKI must be the AlgorithmIdentifier SEQUENCE.
+        let Ok((inner_tag, inner, _)) = read_tlv_any(value) else {
+            continue;
+        };
+        if inner_tag != 0x30 {
+            continue;
+        }
+        // Inside it: the algorithm OID, then the namedCurve OID.
+        let Ok((alg_tag, alg_oid, alg_used)) = read_tlv_any(inner) else {
+            continue;
+        };
+        if alg_tag != 0x06 {
+            continue;
+        }
+        const ID_EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+        if alg_oid != ID_EC_PUBLIC_KEY {
+            continue;
+        }
+        let Ok((curve_tag, curve_oid, _)) = read_tlv_any(&inner[alg_used..]) else {
+            continue;
+        };
+        if curve_tag != 0x06 {
+            continue;
+        }
+        return Some(curve_oid.to_vec());
+    }
+    None
+}
+
 /// Extract `(tbsCertificate DER as signed, signature BIT STRING payload)`.
 ///
 /// The bytes that were signed are the *complete* tbsCertificate TLV — tag,
@@ -861,6 +924,36 @@ mod tests {
     /// thing of `verify_signed_by_key`, against the CI the certificate's own Authority Key
     /// Identifier names — which is what makes it a meaningful check rather than a comparison
     /// against an arbitrary key.
+    /// The raw `namedCurve` OID reads for a curve the crate does **not** model.
+    ///
+    /// This is the primitive §4.2.18 SM-DS_ErrorCases #03 depends on: the card has to notice
+    /// that `CERT_S_SM_DSauth_INV_CURVE_NIST192.der` names `prime192v1` and refuse it with
+    /// `unsupportedCurve(3)`. `Certificate::from_der` cannot even parse that certificate — P-192
+    /// is not a `CurveKind` — so without this the card cannot form the judgement the case
+    /// requires, and would answer `invalidOid` after failing to read the role instead.
+    #[test]
+    fn the_named_curve_oid_reads_for_unsupported_curves() {
+        const DIR: &str = crate::sgp26::Sgp26VariantO::DIR;
+        let read = |name: &str| std::fs::read(format!("{DIR}/{name}")).expect(name);
+
+        // prime192v1, 1.2.840.10045.3.1.1 — a curve CurveKind does not model.
+        const PRIME192V1: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x01];
+        let p192 = read("CERT_S_SM_DSauth_INV_CURVE_NIST192.der");
+        assert_eq!(
+            certificate_named_curve_oid(&p192).as_deref(),
+            Some(PRIME192V1),
+            "the unsupported curve OID must still be readable"
+        );
+
+        // And a supported curve still reads, so the function is not simply returning a constant.
+        let p256 = read("CERT_CI_ECDSA_NIST.der");
+        assert_eq!(
+            certificate_named_curve_oid(&p256).as_deref(),
+            Some(crate::ecdsa::CurveKind::P256.oid()),
+            "a supported curve must read as itself"
+        );
+    }
+
     #[test]
     fn an_invalid_certificate_signature_is_rejected() {
         const DIR: &str = crate::sgp26::Sgp26VariantO::DIR;
