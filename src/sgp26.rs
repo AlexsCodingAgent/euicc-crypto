@@ -126,6 +126,16 @@ pub struct Sgp26VariantO {
     /// the case about a bad certificate rather than about a wrong role — and it is why the
     /// card must return `invalidCertificate`, not `invalidOid`, when it is presented.
     pub ds_auth_invalid_signature_cert: Option<Certificate>,
+
+    /// `CERT_S_SM_DSauth_INV_CURVE_<curve>192.der` — an SM-DS authentication certificate on
+    /// **P-192**, a curve no RSP eUICC holds keys for.
+    ///
+    /// §4.2.18 SM-DS_ErrorCases #03 names this file, and it is the one genuinely SM-DS-specific
+    /// certificate in that group: the defect is the *curve*, so the eUICC must answer
+    /// `unsupportedCurve(3)` rather than `invalidCertificate(1)` — §5.7.4 gives the two codes
+    /// for distinct conditions, and a well-formed certificate on a curve the card has no keys
+    /// for is the former.
+    pub ds_auth_invalid_curve_cert: Option<Certificate>,
 }
 
 impl CurveKind {
@@ -216,6 +226,19 @@ impl Sgp26VariantO {
             .ok()
             .and_then(|der| Certificate::from_der(&der).ok());
 
+        // Named `..._NIST192` / `..._BRP192`: the suffix is the *family* plus the size, not the
+        // `<curve>` spelling the other fixtures use, so this does not go through `sfx`.
+        let ds_auth_invalid_curve_cert = read(&format!(
+            "CERT_S_SM_DSauth_INV_CURVE_{}192.der",
+            if matches!(curve, CurveKind::BrainpoolP256r1) {
+                "BRP"
+            } else {
+                "NIST"
+            }
+        ))
+        .ok()
+        .and_then(|der| Certificate::from_der(&der).ok());
+
         Ok(Sgp26VariantO {
             curve,
             ci: Certificate::from_der(&read(&format!("CERT_CI_ECDSA_{sfx}.der"))?)?,
@@ -241,6 +264,7 @@ impl Sgp26VariantO {
             dp_pb_private,
             dp_auth_cert,
             ds_auth_invalid_signature_cert,
+            ds_auth_invalid_curve_cert,
         })
     }
 

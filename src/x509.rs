@@ -886,6 +886,20 @@ mod tests {
             "a valid certificate must verify under the same CI"
         );
 
+        // The AKI value itself, pinned to the bytes openssl reports. The earlier failure was
+        // here: the reader returned a different twenty bytes, so the SKI comparison failed and
+        // chain verification silently reported "cannot judge" instead of a verdict.
+        assert_eq!(
+            inv.authority_key_identifier().as_deref(),
+            Some(
+                &[
+                    0xf5, 0x41, 0x72, 0xbd, 0xf9, 0x8a, 0x95, 0xd6, 0x5c, 0xbe, 0xb8, 0x8a, 0x38,
+                    0xa1, 0xc1, 0x1d, 0x80, 0x0a, 0x85, 0xc3,
+                ][..]
+            ),
+            "the AKI must be the [0] member of authorityKeyIdentifier, not a later member"
+        );
+
         // And the SKI/AKI pair must match, which is what selects the anchor during chain
         // verification. If these disagreed, the published invalid-signature certificate would
         // be checked against the wrong key and the check would be meaningless.
