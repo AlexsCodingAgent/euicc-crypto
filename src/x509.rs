@@ -176,15 +176,19 @@ impl Certificate {
     /// issuer's SKI, so chain selection matches the two. `None` when the extension is absent,
     /// which means this certificate cannot be selected as an issuer by that route.
     pub fn subject_key_identifier(&self) -> Option<Vec<u8>> {
-        // `subjectKeyIdentifier` is `2.5.29.14`. `extension_value` has already stripped the
-        // `extnValue` OCTET STRING, so what remains is the KeyIdentifier: itself an OCTET
-        // STRING holding the twenty bytes.
-        // The full DER TLV for the OID, header included: `extension_value` searches for the
-        // bytes as they appear in the certificate, and the OID is written as
-        // `06 03 55 1D 0E`. Passing only the content bytes (as this first did) matches
-        // nothing, so the method returned `None` and every chain check silently reported
-        // "cannot judge".
+        // `subjectKeyIdentifier` is `2.5.29.14`.
+        //
+        // The OID is passed **with its DER header** (`06 03 ...`), because `extension_value`
+        // searches for the bytes as they appear in the certificate. Passing only the content
+        // bytes matched nothing, and the method returned `None` — which the caller reports as
+        // "cannot judge", so every chain check silently did nothing rather than failing loudly.
         const OID: &[u8] = &[0x06, 0x03, 0x55, 0x1D, 0x0E];
+
+        // `extension_value` strips the `extnValue` OCTET STRING, so what it hands back is
+        // `04 14 <20 bytes>` — the KeyIdentifier's own OCTET STRING. Verified against the
+        // published CI certificate's bytes rather than reasoned about: the extnValue is 22
+        // bytes, and a single further unwrap yields the 20-byte identifier that matches the
+        // certificate's Authority Key Identifier.
         let ext = self.extension_value(OID)?;
         let (tag, key_id) = Self::read_tlv(ext)?;
         if tag != 0x04 {
