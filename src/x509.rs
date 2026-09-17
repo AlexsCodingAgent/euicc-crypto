@@ -129,6 +129,141 @@ impl Certificate {
         None
     }
 
+    /// The `subjectAltName` extension's content, if present.
+    ///
+    /// SGP.22 §5.7.5 has the eUICC compare this between `CERT.DPauth.SIG` and
+    /// `CERT.DPpb.SIG` to establish that they belong to the same entity. For an
+    /// SM-DP+ certificate SGP.22 §4.5.2.1.0.0 gives the form as
+    /// `GeneralNames ::= { { dNSName '<SM-DP+ hostname (FQDN) value>' } ... }`.
+    ///
+    /// Returned as the raw extension *value* — for the dNSName alternative that is the
+    /// IA5String content, without the GeneralName tag. Comparing two certificates'
+    /// returns therefore compares the names themselves, which is the point; two
+    /// certificates for the same SM-DP+ yield equal values whatever the surrounding
+    /// encoding. Callers that need to distinguish a dNSName from an iPAddress (both are
+    /// permitted to follow) should not rely on this value alone, and the extensions
+    /// this repository deals with use dNSName.
+    ///
+    /// `None` when the extension is absent or unrecognised: a comparison that cannot
+    /// read one side must not silently succeed.
+    pub fn subject_alt_name(&self) -> Option<Vec<u8>> {
+        let ext = self.extension_value(Self::OID_SUBJECT_ALT_NAME)?;
+        // The extension value is a `GeneralNames` SEQUENCE. Step inside and take the
+        // first GeneralName's content.
+        let inner = Self::unwrap_sequence(ext)?;
+        if inner.is_empty() {
+            return None;
+        }
+        let (_tag, content) = Self::read_tlv(inner)?;
+        Some(content.to_vec())
+    }
+
+    /// The `authorityKeyIdentifier` extension's `keyIdentifier`, if present.
+    ///
+    /// SGP.22 §5.7.5 also requires `CERT.DPauth.SIG` and `CERT.DPpb.SIG` to be certified
+    /// by the same certificate, i.e. to "contain the same keyIdentifier in
+    /// authorityKeyIdentifier".
+    ///
+    /// `AuthorityKeyIdentifier ::= SEQUENCE { keyIdentifier [0] IMPLICIT KeyIdentifier
+    /// OPTIONAL, ... }` — so this takes the `[0]` member, tag `0x80`. The other members
+    /// (`authorityCertIssuer`, `authorityCertSerialNumber`) are not a key identifier and
+    /// are not accepted in its place: returning one would make an unrelated pair of
+    /// certificates compare equal.
+    pub fn authority_key_identifier(&self) -> Option<Vec<u8>> {
+        let ext = self.extension_value(Self::OID_AUTHORITY_KEY_IDENTIFIER)?;
+        let seq = Self::unwrap_sequence(ext)?;
+        let mut rest = seq;
+        while !rest.is_empty() {
+            let (tag, content, consumed) = Self::read_tlv_consumed(rest)?;
+            if tag == 0x80 {
+                return Some(content.to_vec());
+            }
+            rest = &rest[consumed..];
+        }
+        None
+    }
+
+    /// `id-ce-subjectAltName`, `2.5.29.17`.
+    const OID_SUBJECT_ALT_NAME: &'static [u8] = &[0x06, 0x03, 0x55, 0x1D, 0x11];
+    /// `id-ce-authorityKeyIdentifier`, `2.5.29.35`.
+    const OID_AUTHORITY_KEY_IDENTIFIER: &'static [u8] = &[0x06, 0x03, 0x55, 0x1D, 0x23];
+
+    /// The `extnValue` octet string of the extension carrying `oid`.
+    ///
+    /// `Extension ::= SEQUENCE { extnID OBJECT IDENTIFIER, critical BOOLEAN DEFAULT
+    /// FALSE, extnValue OCTET STRING }`, so after the OID come an optional BOOLEAN and
+    /// the OCTET STRING — the contents of which are themselves DER, which is why the
+    /// caller unwraps a SEQUENCE from what this returns.
+    fn extension_value(&self, oid: &[u8]) -> Option<&[u8]> {
+        let der = &self.der;
+        let mut i = 0usize;
+        while i + oid.len() < der.len() {
+            if !der[i..].starts_with(oid) {
+                i += 1;
+                continue;
+            }
+            let mut j = i + oid.len();
+            // Skip `critical` if present: BOOLEAN is 0x01.
+            if *der.get(j)? == 0x01 {
+                let len = *der.get(j + 1)? as usize;
+                if len > 0x7F {
+                    return None;
+                }
+                j += 2 + len;
+            }
+            // The extnValue OCTET STRING.
+            if *der.get(j)? != 0x04 {
+                i += 1;
+                continue;
+            }
+            let len = *der.get(j + 1)? as usize;
+            if len > 0x7F {
+                return None;
+            }
+            let start = j + 2;
+            let end = start.checked_add(len)?;
+            if end <= der.len() {
+                return Some(&der[start..end]);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The content of `buf` if it is a single SEQUENCE occupying the whole buffer.
+    fn unwrap_sequence(buf: &[u8]) -> Option<&[u8]> {
+        let (tag, content) = Self::read_tlv(buf)?;
+        if tag == 0x30 {
+            Some(content)
+        } else {
+            None
+        }
+    }
+
+    /// Read one TLV from the front of `buf`, returning its tag and content.
+    fn read_tlv(buf: &[u8]) -> Option<(u8, &[u8])> {
+        let (tag, content, _) = Self::read_tlv_consumed(buf)?;
+        Some((tag, content))
+    }
+
+    /// Read one TLV, also returning how many bytes it occupied.
+    fn read_tlv_consumed(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
+        let tag = *buf.first()?;
+        let len = *buf.get(1)? as usize;
+        // Short form only, as `subject_serial_number` does: a value longer than 127
+        // octets is not one of the identifiers read here, so treat it as a non-match
+        // rather than following a long-form length we have not validated.
+        if len > 0x7F {
+            return None;
+        }
+        let start = 2usize;
+        let end = start.checked_add(len)?;
+        if end > buf.len() {
+            return None;
+        }
+        Some((tag, &buf[start..end], end))
+    }
+
     /// Verify that `self` was signed by `issuer`'s key, over `self`'s
     /// TBSCertificate.
     ///
@@ -395,6 +530,134 @@ fn read_length(input: &[u8]) -> Result<(usize, usize)> {
 mod tests {
     use super::*;
     use crate::testpki::TestPki;
+
+    /// The readers must extract *something* from a certificate that carries the
+    /// extensions.
+    ///
+    /// `subject_alt_name` and `authority_key_identifier` return `Option`, so a check
+    /// built on them compares two values that may both be `None`. If the readers could
+    /// not find the extensions, the comparison would be vacuous and §4.2.10 #03 would
+    /// pass without reading a certificate at all.
+    ///
+    /// It must NOT use `TestPki`: those certificates carry **no extensions whatsoever**
+    /// (a 313-byte DER with neither `55 1D 11` nor `55 1D 23` anywhere), so they cannot
+    /// exercise these readers — an earlier version of this test used them and failed,
+    /// correctly. The readers are validated against the real SGP.26 corpus instead, in
+    /// `readers_work_on_the_sgp26_certificates`.
+    #[test]
+    fn readers_are_absent_on_a_certificate_without_extensions() {
+        // The synthetic PKI is the useful negative case: the readers must report
+        // absence rather than scanning for a plausible-looking byte sequence.
+        let pki = TestPki::new();
+        let cert = Certificate::from_der(pki.eum_cert_der()).unwrap();
+        assert_eq!(
+            cert.subject_alt_name(),
+            None,
+            "the test PKI's certificates carry no subjectAltName, so None is honest"
+        );
+        assert_eq!(cert.authority_key_identifier(), None);
+    }
+
+    /// The readers against the *real* SGP.26 certificates, and the §5.7.5 comparison.
+    ///
+    /// `PrepareDownload` must check that `CERT.DPauth.SIG` and `CERT.DPpb.SIG` belong to
+    /// the same entity. These are the only certificates available that carry the
+    /// extensions that check needs, so they are what the readers must be shown to work
+    /// on.
+    ///
+    /// The useful assertion is the *comparison*, not merely that both sides are
+    /// `Some`: if every certificate agreed, the §5.7.5 check would be satisfied by any
+    /// pair and would prove nothing. So the `DPpb`/`DPauth` pair of one entity must
+    /// agree, and it must be possible to find a pair that does not.
+    #[test]
+    fn readers_work_on_the_sgp26_certificates() {
+        const ROOT: &str = "/home/agent/sgp26-variant-o";
+        let dir = std::path::Path::new(ROOT);
+        if !dir.exists() {
+            // The corpus is not part of this repository; skip rather than fail.
+            return;
+        }
+
+        let base = format!("{ROOT}/Variants A_B_C/Variant A/SM-DP+");
+        // The subdirectory and the filename suffix are both `DPpb` / `DPauth`, not the
+        // bare `pb` / `auth`: the corpus is laid out as
+        //     SM-DP+/DPpb/CERT_S_SM_DPpb_VARA_SIG_NIST.der
+        //     SM-DP+/DPauth/CERT_S_SM_DPauth_VARA_SIG_NIST.der
+        // and an earlier version of this helper looked in `SM-DP+/pb/`, found nothing,
+        // returned `None`, and skipped every pair — reporting "no pair was readable"
+        // rather than naming the missing file.
+        let read = |kind: &str, id: &str| -> Option<(Certificate, Vec<u8>, Vec<u8>)> {
+            let dir = format!("{id}{kind}");
+            let path = format!("{base}/{dir}/CERT_S_SM_{dir}_VARA_SIG_NIST.der");
+            let der = std::fs::read(&path).ok()?;
+            let cert = Certificate::from_der(&der).ok()?;
+            let san = cert.subject_alt_name()?;
+            let aki = cert.authority_key_identifier()?;
+            Some((cert, san, aki))
+        };
+
+        let mut pairs = 0usize;
+        for entity in ["DP", "DP2"] {
+            let Some((_, pb_san, pb_aki)) = read("pb", entity) else {
+                continue;
+            };
+            let Some((_, auth_san, auth_aki)) = read("auth", entity) else {
+                continue;
+            };
+            assert_eq!(
+                pb_san, auth_san,
+                "the DPpb and DPauth certificate of one entity must share a subjectAltName"
+            );
+            assert_eq!(
+                pb_aki, auth_aki,
+                "the DPpb and DPauth certificate of one entity must share a key identifier"
+            );
+            pairs += 1;
+        }
+        assert!(pairs > 0, "no SGP.26 certificate pair was readable");
+
+        // The discriminating case: certificates of *different* entities must differ, or
+        // the comparison above would hold for any pair.
+        let dp = read("pb", "DP").map(|(_, san, aki)| (san, aki));
+        let dp2 = read("pb", "DP2").map(|(_, san, aki)| (san, aki));
+        if let (Some((san_a, aki_a)), Some((san_b, aki_b))) = (dp, dp2) {
+            assert!(
+                san_a != san_b || aki_a != aki_b,
+                "two different SM-DP+ entities must not compare equal, else the \
+                 same-entity check in §5.7.5 cannot fail and is not a check"
+            );
+        }
+    }
+
+    /// A certificate with no such extension yields `None`, so a caller cannot mistake
+    /// "unreadable" for "equal".
+    #[test]
+    fn a_certificate_without_the_extension_yields_none() {
+        // An empty DER does not parse, so build a certificate-shaped blob that does
+        // but carries no extensions:
+        //
+        //   Certificate ::= SEQUENCE { tbsCertificate SEQUENCE { ... }, ... }
+        //
+        // The readers scan for extension OIDs anywhere in the DER, so an input whose
+        // only SEQUENCE is the outer one must yield None for both rather than panicking
+        // or scanning past the end. `Certificate::from_der` extracts an SPKI, which this
+        // does not have, so the assertion is conditional — the property under test is
+        // that neither reader invents a value.
+        fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+            let mut v = vec![tag, value.len() as u8];
+            v.extend_from_slice(value);
+            v
+        }
+        let bare = tlv(0x30, &tlv(0x30, &[0x02, 0x01, 0x01]));
+        if let Ok(cert) = Certificate::from_der(&bare) {
+            assert_eq!(
+                cert.subject_alt_name(),
+                None,
+                "no subjectAltName extension is present, so None is the only honest answer"
+            );
+            assert_eq!(cert.authority_key_identifier(), None);
+        }
+    }
 
     #[test]
     fn parses_a_certificate_and_extracts_the_matching_key() {
