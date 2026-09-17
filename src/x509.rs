@@ -179,7 +179,12 @@ impl Certificate {
         // `subjectKeyIdentifier` is `2.5.29.14`. `extension_value` has already stripped the
         // `extnValue` OCTET STRING, so what remains is the KeyIdentifier: itself an OCTET
         // STRING holding the twenty bytes.
-        const OID: &[u8] = &[0x55, 0x1D, 0x0E];
+        // The full DER TLV for the OID, header included: `extension_value` searches for the
+        // bytes as they appear in the certificate, and the OID is written as
+        // `06 03 55 1D 0E`. Passing only the content bytes (as this first did) matches
+        // nothing, so the method returned `None` and every chain check silently reported
+        // "cannot judge".
+        const OID: &[u8] = &[0x06, 0x03, 0x55, 0x1D, 0x0E];
         let ext = self.extension_value(OID)?;
         let (tag, key_id) = Self::read_tlv(ext)?;
         if tag != 0x04 {
