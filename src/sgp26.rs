@@ -181,6 +181,12 @@ pub struct Sgp26VariantO {
     /// the role lives in the `certificatePolicies` extension and only the published set
     /// exercises the OID as it is actually written.
     pub dp_pb_as_auth_cert: Option<Certificate>,
+
+    /// The private key matching [`Self::dp_pb_as_auth_cert`].
+    ///
+    /// Needed because the case presents this certificate with a **correctly signed**
+    /// `serverSignature1`: the defect under test is the role, and a signature that also failed
+    /// would let a card refusing for either reason pass.
     pub dp_pb_as_auth_private: Option<KeyPair>,
 }
 
