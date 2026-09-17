@@ -822,7 +822,10 @@ mod tests {
     /// other. Without the second half a reader returning a constant would pass.
     #[test]
     fn the_role_oids_match_real_certificates() {
-        const DIR: &str = "/home/agent/repos/euicc-crypto/fixtures/sgp26/variant-o";
+        // Resolved from the crate root, not an absolute path: an absolute path exists on the
+        // development machine and nowhere else, and the assertion below would then fail in
+        // CI reporting a missing role table rather than a missing directory.
+        const DIR: &str = crate::sgp26::Sgp26VariantO::DIR;
         let load = |name: &str| -> Option<Certificate> {
             let der = std::fs::read(format!("{DIR}/{name}")).ok()?;
             Certificate::from_der(&der).ok()
@@ -878,7 +881,10 @@ mod tests {
     /// extension, it simply does not hold the role the operation requires.
     #[test]
     fn a_non_server_role_is_not_accepted() {
-        const DIR: &str = "/home/agent/repos/euicc-crypto/fixtures/sgp26/variant-o";
+        // Resolved from the crate root, not an absolute path: an absolute path exists on the
+        // development machine and nowhere else, and the assertion below would then fail in
+        // CI reporting a missing role table rather than a missing directory.
+        const DIR: &str = crate::sgp26::Sgp26VariantO::DIR;
         let path = format!("{DIR}/CERT_CI_ECDSA_NIST.der");
         let Ok(der) = std::fs::read(&path) else {
             return;
