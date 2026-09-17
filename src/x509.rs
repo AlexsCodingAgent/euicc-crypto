@@ -188,6 +188,12 @@ impl Certificate {
         Some(key_id.to_vec())
     }
 
+    /// This certificate's Authority Key Identifier, from its `authorityKeyIdentifier`
+    /// extension.
+    ///
+    /// Names the **issuer's** Subject Key Identifier, which is how a chain is selected without
+    /// trusting the issuer *name* — a string an attacker controls. See
+    /// [`Self::subject_key_identifier`] for the other half of that comparison.
     pub fn authority_key_identifier(&self) -> Option<Vec<u8>> {
         let ext = self.extension_value(Self::OID_AUTHORITY_KEY_IDENTIFIER)?;
         let seq = Self::unwrap_sequence(ext)?;
